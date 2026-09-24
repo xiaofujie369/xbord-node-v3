@@ -733,10 +733,11 @@ func buildAnyTLS(base M, nc *model.NodeSpec, users []model.UserSpec, tc kernel.T
 		base["padding_scheme"] = nc.PaddingScheme
 	}
 
-	if tls := buildTLSConfig(nc, tc); tls != nil {
+	if nc.TLS == 2 {
+		base["tls"] = buildRealityConfig(nc)
+	} else if tls := buildTLSConfig(nc, tc); tls != nil {
+		// Existing panels omit the TLS mode for certificate-based AnyTLS.
 		base["tls"] = tls
-	} else {
-		nlog.Core().Warn("anytls requires TLS certificate files on disk; configure cert_mode (self, file, http, dns, or content). Sing-box will not start this inbound without tls.")
 	}
 	return base
 }

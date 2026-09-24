@@ -4,11 +4,14 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1170,8 +1173,10 @@ func validateNodeRuntime(cfg *config.Config, kcfgSupported []string, spec *model
 func validateTLSRequirements(spec *model.NodeSpec, tls kernel.TLSCert, kernelType string) error {
 	needsCert := false
 	switch spec.Protocol {
-	case "hysteria", "hysteria2", "tuic", "anytls":
+	case "hysteria", "hysteria2", "tuic":
 		needsCert = true
+	case "anytls":
+		needsCert = spec.TLS == 1
 	case "trojan":
 		if spec.TLS != 2 {
 			needsCert = true
@@ -1230,18 +1235,69 @@ func validateRuntimeCertConfig(spec *model.NodeSpec) error {
 	return nil
 }
 
-func validateRealityRequirements(spec *model.NodeSpec, _ string) error {
+func validateRealityRequirements(spec *model.NodeSpec, kernelType string) error {
 	if spec.TLSSettings == nil {
 		return fmt.Errorf("reality tls requires tls_settings")
 	}
 	privateKey := strings.TrimSpace(stringValue(spec.TLSSettings["private_key"]))
 	serverName := strings.TrimSpace(stringValue(spec.TLSSettings["server_name"]))
 	dest := strings.TrimSpace(stringValue(spec.TLSSettings["dest"]))
+	if dest != stringValue(spec.TLSSettings["dest"]) || serverName != stringValue(spec.TLSSettings["server_name"]) {
+		return fmt.Errorf("reality tls_settings.dest and server_name must not contain surrounding whitespace")
+	}
 	if privateKey == "" {
 		return fmt.Errorf("reality tls requires tls_settings.private_key")
 	}
 	if serverName == "" && dest == "" {
 		return fmt.Errorf("reality tls requires tls_settings.server_name or tls_settings.dest")
+	}
+	// Match the shared builders' server_name fallback and default port.
+	target := dest
+	if target == "" {
+		target = serverName
+	}
+	host := target
+	if strings.Contains(target, ":") {
+		var port string
+		var err error
+		host, port, err = net.SplitHostPort(target)
+		if err != nil {
+			return fmt.Errorf("reality tls requires a valid tls_settings.dest host or host:port")
+		}
+		p, err := strconv.Atoi(port)
+		if err != nil || p < 1 || p > 65535 {
+			return fmt.Errorf("reality tls requires a valid tls_settings.dest port")
+		}
+		// The existing sing-box builder splits dest at its first colon.
+		if (kernelType == "singbox" || kernelType == "sing-box") && strings.Contains(host, ":") {
+			return fmt.Errorf("reality tls_settings.dest IPv6 is not supported by the sing-box builder")
+		}
+	}
+	if host == "" || strings.ContainsAny(host, " /\\\t\r\n?#@[]") {
+		return fmt.Errorf("reality tls requires a valid tls_settings.dest host")
+	}
+	var shortIDs []string
+	switch ids := spec.TLSSettings["short_id"].(type) {
+	case nil:
+	case string:
+		shortIDs = []string{ids}
+	case []string:
+		shortIDs = ids
+	case []any:
+		for _, value := range ids {
+			id, ok := value.(string)
+			if !ok {
+				return fmt.Errorf("reality tls_settings.short_id must contain strings")
+			}
+			shortIDs = append(shortIDs, id)
+		}
+	default:
+		return fmt.Errorf("reality tls_settings.short_id must be a string or array")
+	}
+	for _, id := range shortIDs {
+		if _, err := hex.DecodeString(id); err != nil || len(id) > 16 {
+			return fmt.Errorf("reality tls_settings.short_id must be even-length hex of at most 16 characters")
+		}
 	}
 	return nil
 }
