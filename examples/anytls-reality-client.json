@@ -1,0 +1,26 @@
+{
+  "log": {"level": "info"},
+  "inbounds": [
+    {"type": "mixed", "tag": "local-proxy", "listen": "127.0.0.1", "listen_port": 1080}
+  ],
+  "outbounds": [
+    {
+      "type": "anytls",
+      "tag": "anytls-reality",
+      "server": "NODE_IP",
+      "server_port": 443,
+      "password": "USER_UUID",
+      "tls": {
+        "enabled": true,
+        "server_name": "TEST_SERVER_NAME",
+        "utls": {"enabled": true, "fingerprint": "chrome"},
+        "reality": {
+          "enabled": true,
+          "public_key": "REALITY_PUBLIC_KEY",
+          "short_id": "0123456789abcdef"
+        }
+      }
+    }
+  ],
+  "route": {"final": "anytls-reality"}
+}
