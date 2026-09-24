@@ -125,3 +125,36 @@ Captured by `TestBuildInbound_AnyTLS_Reality_GeneratedConfig`; only password/pri
 Local commits are separated into audit (`997e8bc`), tests (`aa579e6`), feature/shared validation (`fc4d1dd`), and local integration evidence (`69b3739`), followed by documentation. No remote push or PR was created.
 
 To roll back a deployment, restore the previous binary and known-good node config; revert the feature commit in the development branch if needed. No schema migration, key replacement, or database rollback is required. Keep private keys outside version control.
+
+## Numbered task acceptance audit
+
+Rechecked against the original task document after implementation. PASS below is scoped to the evidence stated; it does not promote mocked or local checks to deployed panel acceptance.
+
+| Task sections | Current evidence and disposition |
+| --- | --- |
+| 0–4 | PASS: exact node/reference commits inspected; existing builders retained; both reference templates read. |
+| 5 | PASS locally: REALITY and certificate client round trips, optional-TLS server startup. Legacy omitted-mode certificate behavior is explicitly preserved. |
+| 6–8 | PASS audit: implementation plan predates code; model, panel, controlplane and service paths inspected. Real stock AnyTLS API cannot emit mode 2. |
+| 9–14 | PASS: existing builder reuse, UUID authentication, unchanged panel padding, string/array short IDs and original fields; generated JSON captured. |
+| 15–18 | PASS: all four requested named AnyTLS builder tests exist and pass, plus short-ID-array test. |
+| 19–21 | PASS: shared runtime validation accepts certificate-free REALITY; rejects missing settings/key/target, malformed destination and short IDs. Existing server_name fallback retained. |
+| 22–24 | PASS: native client example and integration guide supplied; no subscription implementation. |
+| 25 | INCOMPLETE: local checks and binary startup pass, but real Xboard user sync/reporting/limits/online-IP acceptance is missing. |
+| 26–30 | GATED: read-only mapping audit done; native Xboard model/API/admin UI/key-generator work is Phase 2 and has not begun. |
+| 31–33 | GATED: Phase 3 subscription generation has not begun. Native JSON test client exists; no unverified Mihomo or URI support claimed. |
+| 34–36 | PASS: no upstream dependency/library edit, copied installer, second production synchronizer or external runtime layer. |
+| 37–38 | PASS configuration isolation tests; existing per-node architecture retained. Concurrent deployed multi-node acceptance remains unverified. |
+| 39 | PASS: complete NodeSpec hash retained; tests cover all four REALITY settings. |
+| 40 | PASS for specified missing-key/malformed-target/short-ID rejection; invalid WS/poll update preserves config/hash before kernel call. Existing general nontransactional reload limitation remains disclosed. |
+| 41 | PASS change review: new validation messages do not include secret values; generated report masks private key/password; client has no private key. |
+| 42–44 | PASS: existing VLESS/Trojan REALITY regression tests and standard AnyTLS unit/real client tests. |
+| 45–47 | PASS: small separate commits, two production files, no architecture refactor. |
+| 48 | PASS: IMPLEMENTATION_PLAN.md created and committed before production edits, covering all ten requested topics. |
+| 49 | PASS: formatting, vet, full tests, make test, production-tag tests/build; no make lint target exists. |
+| 50–51 | PASS: report includes base, files/functions, tests, real generated masked config, regression results and limitations. |
+| 52 | INCOMPLETE: the full PASS checklist includes real panel gates, so Phase 1 Complete is intentionally not claimed. |
+| 53–54 | GATED: later Xboard native configuration and subscription tasks await Phase 1 acceptance. |
+| 55 | DEFERRED as explicitly optional Phase 4 work. |
+| 56–57 | PASS: cloned latest node first, inspected reference, planned before editing, reused existing architecture and builders. |
+
+Blocking prerequisite: a compatible isolated Xboard test environment must deliver AnyTLS TLS=2 to finish the real-panel gates. The audited stock API lacks that behavior. Changing it now would enter Phase 2 before sections 25/52 permit it. The pending environment question therefore concerns a concrete missing prerequisite, not an additional approval requirement inferred from a skill. No further production-code change can by itself establish the missing panel acceptance evidence.
