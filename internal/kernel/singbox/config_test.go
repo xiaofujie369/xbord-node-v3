@@ -964,3 +964,27 @@ func TestBuildInbound_AnyTLS_NoTLS(t *testing.T) {
 		t.Fatal("unexpected TLS block without certificates or REALITY")
 	}
 }
+
+func TestBuildInbound_AnyTLS_Reality_GeneratedConfig(t *testing.T) {
+	inbound := buildInbound(&model.NodeSpec{Protocol: "anytls", ServerPort: 443, TLS: 2, TLSSettings: map[string]any{"private_key": "fixture-private-key", "short_id": "0123456789abcdef", "dest": "example.com:443", "server_name": "example.com"}}, []model.UserSpec{{ID: 1, UUID: "test-user"}}, kernel.TLSCert{})
+	inbound["users"].([]M)[0]["password"] = "***"
+	inbound["tls"].(M)["reality"].(M)["private_key"] = "***"
+	data, err := json.MarshalIndent(inbound, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("Sanitized generated config:\n%s", data)
+}
+
+func TestBuildInbound_AnyTLS_Reality_NodeIsolation(t *testing.T) {
+	first := &model.NodeSpec{Protocol: "anytls", ServerPort: 9443, TLS: 2, TLSSettings: map[string]any{"private_key": "key-one", "short_id": "11", "dest": "one.example.com:443", "server_name": "one.example.com"}}
+	second := &model.NodeSpec{Protocol: "anytls", ServerPort: 9444, TLS: 2, TLSSettings: map[string]any{"private_key": "key-two", "short_id": "22", "dest": "two.example.com:8443", "server_name": "two.example.com"}}
+	one := buildInbound(first, testUsers, kernel.TLSCert{})
+	two := buildInbound(second, testUsers, kernel.TLSCert{})
+	assertMapValue(t, one, "listen_port", 9443)
+	assertMapValue(t, two, "listen_port", 9444)
+	assertMapValue(t, one["tls"].(M)["reality"].(M), "private_key", "key-one")
+	assertMapValue(t, two["tls"].(M)["reality"].(M), "private_key", "key-two")
+	assertMapValue(t, one["tls"].(M), "server_name", "one.example.com")
+	assertMapValue(t, two["tls"].(M), "server_name", "two.example.com")
+}

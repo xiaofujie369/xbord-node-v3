@@ -7,9 +7,12 @@ import (
 	"crypto/ecdh"
 	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
+	"golang.org/x/time/rate"
 	"io"
 	"net"
 	"net/http"
@@ -42,6 +45,14 @@ func anyTLSFreePort(t *testing.T) int {
 // Uses the project's embedded runtime and a real native AnyTLS client. All
 // listeners, generated keys and the REALITY handshake target are local.
 func TestAnyTLSRealityLocalRoundTrip(t *testing.T) {
+	testAnyTLSLocalRoundTrip(t, 2)
+}
+
+func TestAnyTLSStandardTLSLocalRoundTrip(t *testing.T) {
+	testAnyTLSLocalRoundTrip(t, 1)
+}
+
+func testAnyTLSLocalRoundTrip(t *testing.T, mode int) {
 	target := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, "handshake target") }))
 	target.TLS = &tls.Config{MinVersion: tls.VersionTLS13, CurvePreferences: []tls.CurveID{tls.X25519}}
 	target.StartTLS()
@@ -53,18 +64,42 @@ func TestAnyTLSRealityLocalRoundTrip(t *testing.T) {
 	}
 	node := &model.NodeSpec{Protocol: "anytls", ListenIP: "127.0.0.1", ServerPort: anyTLSFreePort(t), TLS: 2, PaddingScheme: "stop=8\n0=30-30", TLSSettings: map[string]any{
 		"private_key": base64.RawURLEncoding.EncodeToString(key.Bytes()), "short_id": "0123456789abcdef", "dest": destination, "server_name": "example.com"}}
+	node.TLS = mode
+	cert := kernel.TLSCert{}
+	if mode == 1 {
+		fixture := target.TLS.Certificates[0]
+		keyDER, err := x509.MarshalPKCS8PrivateKey(fixture.PrivateKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cert = kernel.TLSCert{CertPEM: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: fixture.Certificate[0]}), KeyPEM: pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})}
+	}
 	users := []model.UserSpec{{ID: 1, UUID: "local-integration-user"}}
+	// Permit only this loopback fixture ahead of the production SSRF blocks.
+	node.CustomRoutes = []map[string]any{{"ip_cidr": []string{"127.0.0.1/32"}, "outbound": "direct"}}
 	server := New(config.KernelConfig{Type: "singbox"})
-	if err := server.Start(node, users, kernel.TLSCert{}); err != nil {
+	lim := rate.NewLimiter(32*1024, 1024*1024)
+	server.SetSpeedLimitFunc(func(string) *rate.Limiter { return lim })
+	server.SetDeviceLimitFunc(func(string) (int, bool) { return 1, true })
+	if err := server.Start(node, users, cert); err != nil {
 		t.Fatal(err)
 	}
 	defer server.Stop()
-	echo := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.Copy(w, r.Body) }))
+	online := make(chan bool, 8)
+	echo := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, alive, _, _ := server.GetUserTraffic(context.Background())
+		online <- alive[1]["127.0.0.1"] || alive[2]["127.0.0.1"]
+		io.Copy(w, r.Body)
+	}))
 	defer echo.Close()
 
 	request := func(password string) error {
 		port := anyTLSFreePort(t)
 		clientConfig := M{"log": M{"disabled": true}, "inbounds": []M{{"type": "mixed", "tag": "local-client", "listen": "127.0.0.1", "listen_port": port}}, "outbounds": []M{{"type": "anytls", "tag": "proxy", "server": "127.0.0.1", "server_port": node.ServerPort, "password": password, "tls": M{"enabled": true, "server_name": "example.com", "utls": M{"enabled": true, "fingerprint": "chrome"}, "reality": M{"enabled": true, "public_key": base64.RawURLEncoding.EncodeToString(key.PublicKey().Bytes()), "short_id": "0123456789abcdef"}}}}}
+		if mode == 1 {
+			// Trust only the local fixture certificate; production example never skips verification.
+			clientConfig["outbounds"].([]M)[0]["tls"] = M{"enabled": true, "server_name": "example.com", "certificate": []string{string(cert.CertPEM)}}
+		}
 		data, _ := json.Marshal(clientConfig)
 		ctx, cancel := context.WithCancel(include.Context(context.Background()))
 		defer cancel()
@@ -99,18 +134,23 @@ func TestAnyTLSRealityLocalRoundTrip(t *testing.T) {
 		}
 		return nil
 	}
+	lim.AllowN(time.Now(), int(lim.Tokens())) // exhaust startup burst before timing
+	started := time.Now()
 	if err := request(users[0].UUID); err != nil {
 		t.Fatal(err)
 	}
-	traffic, alive, _, err := server.GetUserTraffic(context.Background())
+	if time.Since(started) < 100*time.Millisecond {
+		t.Fatal("per-user speed limit did not delay the transfer")
+	}
+	traffic, _, _, err := server.GetUserTraffic(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if traffic[1][0] == 0 || traffic[1][1] == 0 {
 		t.Fatalf("missing per-user traffic: %v", traffic)
 	}
-	if !alive[1]["127.0.0.1"] {
-		t.Fatalf("missing online IP: %v", alive)
+	if !<-online {
+		t.Fatal("missing online IP while request was active")
 	}
 	if _, _, err := server.UpdateUsers([]model.UserSpec{{ID: 2, UUID: "replacement-local-user"}}); err != nil {
 		t.Fatal(err)
@@ -124,9 +164,30 @@ func TestAnyTLSRealityLocalRoundTrip(t *testing.T) {
 	// Rebuild the inbound on the same port with new per-node settings.
 	updated := *node
 	updated.TLSSettings = map[string]any{"private_key": node.TLSSettings["private_key"], "short_id": []string{"0123456789abcdef", "1111111111111111"}, "dest": destination, "server_name": "example.com"}
-	if err := server.Reload(&updated, []model.UserSpec{{ID: 2, UUID: "replacement-local-user"}}, kernel.TLSCert{}); err != nil {
+	if err := server.Reload(&updated, []model.UserSpec{{ID: 2, UUID: "replacement-local-user"}}, cert); err != nil {
 		t.Fatal(err)
 	}
+	if err := request("replacement-local-user"); err != nil {
+		t.Fatal(err)
+	}
+	// Wait for the previous stream's asynchronous close before simulating a
+	// new device; an already active local IP is intentionally grandfathered.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		_, alive, _, _ := server.GetUserTraffic(context.Background())
+		if len(alive[2]) == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("previous stream did not close")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	server.UpdateGlobalDevices(map[int][]string{2: {"10.0.0.1"}})
+	if err := request("replacement-local-user"); err == nil {
+		t.Fatal("device limit did not reject an additional source IP")
+	}
+	server.ClearGlobalDevices()
 	if err := request("replacement-local-user"); err != nil {
 		t.Fatal(err)
 	}
