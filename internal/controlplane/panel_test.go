@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/cedar2025/xboard-node/internal/config"
+	"github.com/cedar2025/xboard-node/internal/model"
 	panelapi "github.com/cedar2025/xboard-node/internal/panel"
 )
 
@@ -91,5 +92,40 @@ func TestTranslateWSEventRejectsUnsupportedProtocolForKernel(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), `translate node config: validate custom outbounds: custom_outbounds[0].protocol "hysteria2" is not supported by kernel "xray"`) {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestPanelControlPlaneAnyTLSRealityMapping(t *testing.T) {
+	server := newPanelTestServer(`{"protocol":"anytls","server_port":443,"tls":2,"tls_settings":{"private_key":"test-key","dest":"example.com:443","server_name":"example.com","short_id":["11","2222"]},"padding_scheme":["stop=8","0=30-30"]}`)
+	defer server.Close()
+	cp := NewPanelControlPlane(config.PanelConfig{URL: server.URL, Token: "token", NodeID: 1}, config.WSConfig{}, config.KernelConfig{Type: "singbox"})
+	initial, err := cp.Initial(context.Background(), nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	polled, err := cp.Poll(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, spec := range []*model.NodeSpec{initial.Config, polled.Config} {
+		if spec.TLS != 2 || spec.TLSSettings["private_key"] != "test-key" || spec.PaddingScheme != "stop=8\n0=30-30" {
+			t.Fatal("REST mapping lost AnyTLS settings")
+		}
+		ids, ok := spec.TLSSettings["short_id"].([]any)
+		if !ok || len(ids) != 2 {
+			t.Fatal("REST lost short ID array")
+		}
+	}
+	node := &panelapi.NodeConfig{Protocol: "anytls", TLS: 2, TLSSettings: map[string]any{"private_key": "test-key", "short_id": "11", "dest": "example.com:443"}}
+	event, err := TranslateWSEvent(panelapi.WSEvent{Type: panelapi.WSEventSyncConfig, Config: node}, config.KernelConfig{Type: "singbox"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Config.TLS != 2 || event.Config.TLSSettings["short_id"] != "11" {
+		t.Fatal("WS mapping lost REALITY")
+	}
+	node.TLSSettings["private_key"] = "other-node-key"
+	if event.Config.TLSSettings["private_key"] != "test-key" {
+		t.Fatal("node settings aliased")
 	}
 }

@@ -71,3 +71,9 @@ All changes isolated on codex/anytls-reality. Revert feature/validation commits 
 ```
 
 Phase 1 Complete requires every requested acceptance gate. Phase 2/3 must not start before that gate. This plan precedes implementation edits.
+
+### Dependency and reload audit addendum (before implementation)
+The final go.mod replace directives override the declared sing-box v1.13.2 with the repository's existing `github.com/cedar2025/sing-box v1.14.0-alpha.2.0.20260316103356-2e665cb7e295`. All runtime checks must use this effective pinned dependency. Do not add a fork or change it. Existing Reload removes the old inbound before recreating it and has no complete rollback; service-level early validation is therefore essential. Broader transactional reload redesign is outside the minimum change and remains a documented risk.
+
+### Verified pinned runtime behavior
+The effective dependency's protocol/anytls/inbound.go makes TLS optional; outbound.go still requires TLS. Therefore permit TLS=0 without certificates at service validation (server-only/offload use), retain legacy TLS=0 with certificates, and require certificates for TLS=1. Plaintext native sing-box clients are not supported. PaddingScheme is badoption.Listable[string]; a multiline string is accepted and joined unchanged by the inbound. No padding production change needed.

@@ -887,3 +887,80 @@ func TestExtractECHInbound(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildInbound_AnyTLS_Reality(t *testing.T) {
+	nc := &panel.NodeConfig{Protocol: "anytls", ServerPort: 443, TLS: 2,
+		TLSSettings: map[string]interface{}{"private_key": "test-private-key", "short_id": "0123456789abcdef", "dest": "www.example.com:443", "server_name": "www.example.com"}}
+	// REALITY must take precedence even when old certificate material exists.
+	inbound := buildInbound(testNodeSpec(nc), testUsers, kernel.TLSCert{CertPEM: []byte("CERT"), KeyPEM: []byte("KEY")})
+	assertMapValue(t, inbound, "type", "anytls")
+	assertMapValue(t, inbound, "listen_port", 443)
+	tls, ok := inbound["tls"].(M)
+	if !ok {
+		t.Fatal("missing TLS")
+	}
+	assertMapValue(t, tls, "enabled", true)
+	assertMapValue(t, tls, "server_name", "www.example.com")
+	reality, ok := tls["reality"].(M)
+	if !ok {
+		t.Fatal("missing REALITY")
+	}
+	assertMapValue(t, reality, "enabled", true)
+	assertMapValue(t, reality, "private_key", "test-private-key")
+	assertMapValue(t, reality, "short_id", []string{"0123456789abcdef"})
+	handshake := reality["handshake"].(M)
+	assertMapValue(t, handshake, "server", "www.example.com")
+	assertMapValue(t, handshake, "server_port", 443)
+	if _, ok := tls["certificate"]; ok {
+		t.Fatal("REALITY contains certificate")
+	}
+	for i, user := range inbound["users"].([]M) {
+		assertMapValue(t, user, "name", testUsers[i].UUID)
+		assertMapValue(t, user, "password", testUsers[i].UUID)
+		if _, ok := user["flow"]; ok {
+			t.Fatal("AnyTLS must not use flow")
+		}
+	}
+	if _, ok := inbound["padding_scheme"]; ok {
+		t.Fatal("must preserve upstream default padding")
+	}
+}
+
+func TestBuildInbound_AnyTLS_Reality_ShortIDArray(t *testing.T) {
+	for _, ids := range []any{[]interface{}{"1111111111111111", "2222222222222222"}, []string{"1111111111111111", "2222222222222222"}} {
+		nc := &model.NodeSpec{Protocol: "anytls", ServerPort: 443, TLS: 2, TLSSettings: map[string]any{"private_key": "test-private-key", "short_id": ids, "dest": "example.com:8443"}}
+		inbound := buildInbound(nc, testUsers, kernel.TLSCert{})
+		tls, ok := inbound["tls"].(M)
+		if !ok {
+			t.Fatal("missing TLS")
+		}
+		reality, ok := tls["reality"].(M)
+		if !ok {
+			t.Fatal("missing REALITY")
+		}
+		assertMapValue(t, reality, "short_id", []string{"1111111111111111", "2222222222222222"})
+		assertMapValue(t, reality["handshake"].(M), "server_port", 8443)
+	}
+}
+
+func TestBuildInbound_AnyTLS_StandardTLS(t *testing.T) {
+	for _, mode := range []int{0, 1} { // mode omitted by existing panel remains compatible
+		nc := &model.NodeSpec{Protocol: "anytls", ServerPort: 8443, TLS: mode, ServerName: "example.com"}
+		inbound := buildInbound(nc, testUsers, kernel.TLSCert{CertPEM: []byte("CERT"), KeyPEM: []byte("KEY")})
+		tls := inbound["tls"].(M)
+		assertMapValue(t, tls, "enabled", true)
+		assertMapValue(t, tls, "certificate", []string{"CERT"})
+		assertMapValue(t, tls, "key", []string{"KEY"})
+		assertMapValue(t, tls, "server_name", "example.com")
+		if _, ok := tls["reality"]; ok {
+			t.Fatal("standard TLS contains REALITY")
+		}
+	}
+}
+
+func TestBuildInbound_AnyTLS_NoTLS(t *testing.T) {
+	inbound := buildInbound(&model.NodeSpec{Protocol: "anytls", ServerPort: 443}, testUsers, kernel.TLSCert{})
+	if _, ok := inbound["tls"]; ok {
+		t.Fatal("unexpected TLS block without certificates or REALITY")
+	}
+}
