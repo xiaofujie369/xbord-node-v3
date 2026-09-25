@@ -3,7 +3,7 @@
 This repository archives work in progress; it is not a completed production acceptance release.
 
 - `main`: Xboard-Node implementation, tests, reference client JSON and implementation reports. Upstream baseline: `cedar2025/Xboard-Node` commit `0a29338e1f102a462363ce3527417029f89bab28`.
-- `codex/anytls-reality-panel`: independent Xboard backend history and Phase 2 tests/report. Upstream baseline: `cedar2025/Xboard` commit `4f48e61a2cbc6db5338872b6bdb45ef954ec1256`. This branch contains a different project; do not merge it into the node source tree.
+- `codex/anytls-reality-panel`: complete Xboard backend source snapshot and Phase 2 tests/report, corresponding to local development commit `b7dee72`. Upstream baseline: `cedar2025/Xboard` commit `4f48e61a2cbc6db5338872b6bdb45ef954ec1256`. Full upstream history is omitted from this snapshot. This branch contains a different project; do not merge it into the node source tree.
 
 ## Verified
 
