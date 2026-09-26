@@ -1,0 +1,342 @@
+<?php
+
+namespace App\Services;
+
+use App\Jobs\SendEmailJob;
+use App\Models\MailLog;
+use App\Models\MailTemplate;
+use App\Models\User;
+use App\Utils\CacheKey;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Config;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Mail;
+
+class MailService
+{
+    // Render {{key}} / {{key|default}} placeholders.
+    private static function renderPlaceholders(string $template, array $vars): string
+    {
+        if ($template === '' || empty($vars)) {
+            return $template;
+        }
+
+        return (string) preg_replace_callback('/\{\{\s*([a-zA-Z0-9_.-]+)(?:\|([^}]*))?\s*\}\}/', function ($m) use ($vars) {
+            $key = $m[1] ?? '';
+            $default = array_key_exists(2, $m) ? trim((string) $m[2]) : null;
+
+            if (!array_key_exists($key, $vars) || $vars[$key] === null || $vars[$key] === '') {
+                return $default !== null ? $default : $m[0];
+            }
+
+            $value = $vars[$key];
+            if (is_bool($value)) {
+                return $value ? '1' : '0';
+            }
+            if (is_scalar($value)) {
+                return (string) $value;
+            }
+
+            return json_encode($value, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?: '';
+        }, $template);
+    }
+
+    /**
+     * 获取需要发送提醒的用户总数
+     */
+    public function getTotalUsersNeedRemind(): int
+    {
+        return User::where(function ($query) {
+            $query->where('remind_expire', true)
+                ->orWhere('remind_traffic', true);
+        })
+            ->where('banned', false)
+            ->whereNotNull('email')
+            ->count();
+    }
+
+    /**
+     * 分块处理用户提醒邮件
+     */
+    public function processUsersInChunks(int $chunkSize, ?callable $progressCallback = null): array
+    {
+        $statistics = [
+            'processed_users' => 0,
+            'expire_emails' => 0,
+            'traffic_emails' => 0,
+            'errors' => 0,
+            'skipped' => 0,
+        ];
+
+        User::select('id', 'email', 'expired_at', 'transfer_enable', 'u', 'd', 'remind_expire', 'remind_traffic')
+            ->where(function ($query) {
+                $query->where('remind_expire', true)
+                    ->orWhere('remind_traffic', true);
+            })
+            ->where('banned', false)
+            ->whereNotNull('email')
+            ->chunk($chunkSize, function ($users) use (&$statistics, $progressCallback) {
+                $this->processUserChunk($users, $statistics);
+
+                if ($progressCallback) {
+                    $progressCallback();
+                }
+
+                // 定期清理内存
+                if ($statistics['processed_users'] % 2500 === 0) {
+                    gc_collect_cycles();
+                }
+            });
+
+        return $statistics;
+    }
+
+    /**
+     * 处理用户块
+     */
+    private function processUserChunk($users, array &$statistics): void
+    {
+        foreach ($users as $user) {
+            try {
+                $statistics['processed_users']++;
+                $emailsSent = 0;
+
+                // 检查并发送过期提醒
+                if ($user->remind_expire && $this->shouldSendExpireRemind($user)) {
+                    $this->remindExpire($user);
+                    $statistics['expire_emails']++;
+                    $emailsSent++;
+                }
+
+                // 检查并发送流量提醒
+                if ($user->remind_traffic && $this->shouldSendTrafficRemind($user)) {
+                    $this->remindTraffic($user);
+                    $statistics['traffic_emails']++;
+                    $emailsSent++;
+                }
+
+                if ($emailsSent === 0) {
+                    $statistics['skipped']++;
+                }
+
+            } catch (\Exception $e) {
+                $statistics['errors']++;
+
+                Log::error('发送提醒邮件失败', [
+                    'user_id' => $user->id,
+                    'email' => $user->email,
+                    'error' => $e->getMessage()
+                ]);
+            }
+        }
+    }
+
+    /**
+     * 检查是否应该发送过期提醒
+     */
+    private function shouldSendExpireRemind(User $user): bool
+    {
+        if ($user->expired_at === NULL) {
+            return false;
+        }
+        $expiredAt = $user->expired_at;
+        $now = time();
+        if (($expiredAt - 86400) < $now && $expiredAt > $now) {
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * 检查是否应该发送流量提醒
+     */
+    private function shouldSendTrafficRemind(User $user): bool
+    {
+        if ($user->transfer_enable <= 0) {
+            return false;
+        }
+
+        $usedBytes = $user->u + $user->d;
+        $usageRatio = $usedBytes / $user->transfer_enable;
+
+        // 流量使用超过80%时发送提醒
+        return $usageRatio >= 0.8;
+    }
+
+    public function remindTraffic(User $user)
+    {
+        if (!$user->remind_traffic)
+            return;
+        if (!$this->remindTrafficIsWarnValue($user->u, $user->d, $user->transfer_enable))
+            return;
+        $flag = CacheKey::get('LAST_SEND_EMAIL_REMIND_TRAFFIC', $user->id);
+        if (Cache::get($flag))
+            return;
+        if (!Cache::put($flag, 1, 24 * 3600))
+            return;
+
+        SendEmailJob::dispatch([
+            'email' => $user->email,
+            'subject' => __('The traffic usage in :app_name has reached 80%', [
+                'app_name' => admin_setting('app_name', 'XBoard')
+            ]),
+            'template_name' => 'remindTraffic',
+            'template_value' => [
+                'name' => admin_setting('app_name', 'XBoard'),
+                'url' => admin_setting('app_url')
+            ]
+        ]);
+    }
+
+    public function remindExpire(User $user)
+    {
+        if (!$this->shouldSendExpireRemind($user)) {
+            return;
+        }
+
+        SendEmailJob::dispatch([
+            'email' => $user->email,
+            'subject' => __('The service in :app_name is about to expire', [
+                'app_name' => admin_setting('app_name', 'XBoard')
+            ]),
+            'template_name' => 'remindExpire',
+            'template_value' => [
+                'name' => admin_setting('app_name', 'XBoard'),
+                'url' => admin_setting('app_url')
+            ]
+        ]);
+    }
+
+    private function remindTrafficIsWarnValue($u, $d, $transfer_enable)
+    {
+        $ud = $u + $d;
+        if (!$ud)
+            return false;
+        if (!$transfer_enable)
+            return false;
+        $percentage = ($ud / $transfer_enable) * 100;
+        if ($percentage < 80)
+            return false;
+        if ($percentage >= 100)
+            return false;
+        return true;
+    }
+
+    /**
+     * 发送邮件
+     *
+     * @param array $params 包含邮件参数的数组，必须包含以下字段：
+     *   - email: 收件人邮箱地址
+     *   - subject: 邮件主题
+     *   - template_name: 邮件模板名称，例如 "welcome" 或 "password_reset"
+     *   - template_value: 邮件模板变量，一个关联数组，包含模板中需要替换的变量和对应的值
+     * @return array 包含邮件发送结果的数组，包含以下字段：
+     *   - email: 收件人邮箱地址
+     *   - subject: 邮件主题
+     *   - template_name: 邮件模板名称
+     *   - error: 如果邮件发送失败，包含错误信息；否则为 null
+     * @throws \InvalidArgumentException 如果 $params 参数缺少必要的字段，抛出此异常
+     */
+    public static function sendEmail(array $params)
+    {
+        if (admin_setting('email_host')) {
+            Config::set('mail.host', admin_setting('email_host', config('mail.host')));
+            Config::set('mail.port', admin_setting('email_port', config('mail.port')));
+            Config::set('mail.encryption', admin_setting('email_encryption', config('mail.encryption')));
+            Config::set('mail.username', admin_setting('email_username', config('mail.username')));
+            Config::set('mail.password', admin_setting('email_password', config('mail.password')));
+            Config::set('mail.from.address', admin_setting('email_from_address', config('mail.from.address')));
+            Config::set('mail.from.name', admin_setting('app_name', 'XBoard'));
+        }
+        $email = $params['email'];
+        $subject = $params['subject'];
+        $templateName = $params['template_name'];
+
+        $templateValue = $params['template_value'] ?? [];
+        $vars = is_array($templateValue) ? ($templateValue['vars'] ?? []) : [];
+        $contentMode = is_array($templateValue) ? ($templateValue['content_mode'] ?? null) : null;
+
+        if (is_array($vars) && !empty($vars)) {
+            $subject = self::renderPlaceholders((string) $subject, $vars);
+
+            if (is_array($templateValue) && isset($templateValue['content']) && is_string($templateValue['content'])) {
+                $templateValue['content'] = self::renderPlaceholders($templateValue['content'], $vars);
+            }
+        }
+
+        if ($contentMode === 'text' && is_array($templateValue) && isset($templateValue['content']) && is_string($templateValue['content'])) {
+            $templateValue['content'] = e($templateValue['content']);
+        }
+
+        $params['template_value'] = $templateValue;
+
+        // Check for DB template override (cached to avoid per-email queries in bulk sends).
+        // Cache 'none' sentinel for templates that don't exist in DB.
+        $cacheKey = "mail_template:{$templateName}";
+        $cached = Cache::get($cacheKey);
+        if ($cached === null) {
+            $dbTemplate = MailTemplate::where('name', $templateName)->first();
+            Cache::put($cacheKey, $dbTemplate ?: 'none', 3600);
+        } else {
+            $dbTemplate = ($cached === 'none') ? null : $cached;
+        }
+
+        try {
+            if ($dbTemplate) {
+                $renderVars = self::buildSafeVars($templateValue);
+                $renderedSubject = self::renderPlaceholders($dbTemplate->subject, $renderVars);
+                $renderedContent = self::renderPlaceholders($dbTemplate->content, $renderVars);
+                $subject = $renderedSubject ?: $subject;
+
+                Mail::html($renderedContent, function ($message) use ($email, $subject) {
+                    $message->to($email)->subject($subject);
+                });
+                $params['template_name'] = 'db:' . $templateName;
+            } else {
+                $params['template_name'] = 'mail.default.' . $templateName;
+                Mail::send(
+                    $params['template_name'],
+                    $params['template_value'],
+                    function ($message) use ($email, $subject) {
+                        $message->to($email)->subject($subject);
+                    }
+                );
+            }
+            $error = null;
+        } catch (\Exception $e) {
+            Log::error($e);
+            $error = $e->getMessage();
+        }
+        $log = [
+            'email' => $params['email'],
+            'subject' => $params['subject'],
+            'template_name' => $params['template_name'],
+            'error' => $error,
+            'config' => config('mail')
+        ];
+        MailLog::create($log);
+        return $log;
+    }
+
+    /**
+     * Build HTML-escaped vars for DB template rendering.
+     */
+    private static function buildSafeVars(array $templateValue): array
+    {
+        $safe = [];
+        foreach ($templateValue as $key => $value) {
+            if (is_scalar($value)) {
+                $safe[$key] = e((string) $value);
+            }
+        }
+        // 'content' may be pre-escaped text or admin-authored HTML.
+        // For text mode, apply nl2br so line breaks survive in DB templates
+        // (Blade templates handle this with {!! nl2br($content) !!}).
+        if (isset($templateValue['content'])) {
+            $content = (string) $templateValue['content'];
+            $contentMode = $templateValue['content_mode'] ?? null;
+            $safe['content'] = ($contentMode === 'text') ? nl2br($content) : $content;
+        }
+        return $safe;
+    }
+}
