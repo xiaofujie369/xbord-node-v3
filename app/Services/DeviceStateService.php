@@ -162,7 +162,9 @@ class DeviceStateService
                     }
                 }
                 if (!empty($ips)) {
-                    $result[$userId] = array_unique($ips);
+                    // Deduplication retains numeric keys; reindex so JSON emits
+                    // a list of IP strings rather than an object for WS clients.
+                    $result[$userId] = array_values(array_unique($ips));
                 }
             }
         }
