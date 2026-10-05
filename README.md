@@ -18,6 +18,8 @@ Node backend for [Xboard](https://github.com/cedar2025/Xboard). Supports `sing-b
 
 ## VPS 网络调优
 
+Mieru 的 transport 修复、原生 TCP 分片对照工具和 XBoard 混淆界面配套补丁见 [Mieru 实验说明](docs/MIERU_LAB_ZH.md)。
+
 [一键 BBR 与高吞吐 TCP 配置](docs/NETWORK_TUNING_ZH.md)：独立于节点安装，可重复执行并回退。
 
 ## Install

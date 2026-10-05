@@ -1,3 +1,5 @@
 install-custom.sh text eol=lf
 tune-network.sh text eol=lf
 upgrade-custom.sh text eol=lf
+# Unified patches contain a space prefix on empty context lines.
+integrations/xboard/mieru/subscription.patch text eol=lf whitespace=-blank-at-eol

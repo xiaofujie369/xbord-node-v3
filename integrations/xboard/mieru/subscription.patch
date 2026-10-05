@@ -1,0 +1,21 @@
+diff --git a/app/Protocols/ClashMeta.php b/app/Protocols/ClashMeta.php
+index f76cc8a..98a5873 100644
+--- a/app/Protocols/ClashMeta.php
++++ b/app/Protocols/ClashMeta.php
+@@ -698,9 +698,16 @@ class ClashMeta extends AbstractProtocol
+             'transport' => strtoupper(data_get($protocol_settings, 'transport', 'TCP'))
+         ];
+ 
++        // Native Mieru traffic patterns must reach both ends of the connection.
++        $trafficPattern = data_get($protocol_settings, 'traffic_pattern', '');
++        if (is_string($trafficPattern) && $trafficPattern !== '') {
++            $array['traffic-pattern'] = $trafficPattern;
++        }
++
+         // 如果配置了端口范围
+         if (isset($server['ports'])) {
+             $array['port-range'] = $server['ports'];
++            unset($array['port']);
+         }
+ 
+         return $array;

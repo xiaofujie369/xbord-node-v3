@@ -467,9 +467,11 @@ func buildInbound(nc *model.NodeSpec, users []model.UserSpec, tc kernel.TLSCert)
 
 func buildMieru(base M, nc *model.NodeSpec, users []model.UserSpec) M {
 	base["type"] = "mieru"
-	if nc.Transport != "" {
-		base["transport"] = nc.Transport
+	transport := strings.ToUpper(strings.TrimSpace(nc.Transport))
+	if transport == "" {
+		transport = "TCP"
 	}
+	base["transport"] = transport
 	if nc.TrafficPattern != "" {
 		base["traffic_pattern"] = nc.TrafficPattern
 	}
