@@ -16,6 +16,17 @@ Node backend for [Xboard](https://github.com/cedar2025/Xboard). Supports `sing-b
 
 已提供交互式 `install-custom.sh`，无需 VPS 编译。请先阅读 [Debian 13 一键安装及实测记录](docs/DEPLOYMENT_ZH.md)。下方上游安装方式不包含本仓库 AnyTLS + REALITY 修改。2026-09-29 已修复主站 WebSocket 地址/代理和设备列表序列化问题，连接、推送及自动重连已实测；REST 保留，完整同步边界验收仍待完成。
 
+2026-10-16：安装入口已合并新装、已有标准安装的按需升级及 Certbot 续期检查，
+安装后不用再执行升级脚本。证书续期成功后自动加载，使用固定的 `live/` 路径。
+
+```bash
+apt-get update && apt-get install -y ca-certificates curl && curl -fL --retry 3 https://raw.githubusercontent.com/xiaofujie369/xbord-node-v3/main/install-custom.sh -o /root/install-xboard-custom.sh && bash /root/install-xboard-custom.sh
+```
+
+适用 Debian/Ubuntu amd64、root、systemd；首次交互输入面板服务器信息和可选证书域名。
+已有安装先备份并保留配置。自动续期演练会执行成功续期钩子，短暂重启节点。
+详细行为与限制见 [一体安装与证书续期](docs/SETUP_RENEWAL_ZH.md)。
+
 ## VPS 网络调优
 
 Mieru 的 transport 修复、原生 TCP 分片对照工具和 XBoard 混淆界面配套补丁见 [Mieru 实验说明](docs/MIERU_LAB_ZH.md)。

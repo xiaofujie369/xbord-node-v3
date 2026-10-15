@@ -4,7 +4,7 @@
 
 本指南对应节点源码 417cd4f，面板源码 019677c。2026-09-27 已在 Debian 13 / amd64 上完成 AnyTLS TLS、AnyTLS REALITY、Hysteria2 TLS + Salamander 的实际代理连接和 HTTPS 下载验证。不是全部客户端、移动网络或同步功能的完整验收。
 
-## 一键安装（全新 Debian/Ubuntu amd64）
+## 一键安装（Debian/Ubuntu amd64，新装或已有标准安装）
 
 先在面板创建服务器，准备根地址、服务器 ID 和专用 token。在新 VPS 以 root 执行：
 
@@ -13,9 +13,9 @@ apt-get update && apt-get install -y ca-certificates curl
 curl -fL https://raw.githubusercontent.com/xiaofujie369/xbord-node-v3/main/install-custom.sh -o /root/install-xboard-custom.sh && bash /root/install-xboard-custom.sh
 ```
 
-交互输入上述信息，可选申请域名证书（需要 DNS 正确、TCP 80 放行并同意证书服务条款）。脚本下载固定版本定制二进制，验证压缩包及二进制 SHA-256，创建受限配置及 systemd 开机服务，拒绝覆盖已有安装。无需现场编译，当前只提供 amd64 包。脚本不创建面板节点、不修改防火墙；安装后仍需绑定节点和设置证书路径。当前已部署的测试 VPS 不要重复安装。
+新装时交互输入上述信息，可选申请域名证书（需要 DNS 正确、TCP 80 放行并同意证书服务条款）。脚本下载固定版本定制二进制，验证压缩包及二进制 SHA-256，创建受限配置及 systemd 开机服务，并自动把证书固定路径写入本机配置。已有标准安装自动转入备份、按需升级和续期检查，不重新询问或覆盖面板凭据。无需现场编译，当前只提供 amd64 包。脚本不创建面板节点、不修改防火墙；安装后仍需在面板绑定节点。面板设置的独立证书路径也必须存在。
 
-当前发行包 `custom-hotreload-20261001` 包含面板路由修复和出站/DNS 自动更新修复，二进制 SHA-256 为 `58ce7b14e5e2d23b6cd2765c2ac1771b1f247e4e7e2df1ea8e61a0d1bcbcdcda`。详见 [路由修复记录](ROUTING_VERIFICATION_ZH.md) 和 [热更新实测与旧版升级](HOT_RELOAD_ZH.md)。安装器保留原有配置与证书流程，仍拒绝覆盖已有安装；已有标准服务请使用 `upgrade-custom.sh`。
+当前发行包 `custom-hotreload-20261001` 包含面板路由修复和出站/DNS 自动更新修复，二进制 SHA-256 为 `58ce7b14e5e2d23b6cd2765c2ac1771b1f247e4e7e2df1ea8e61a0d1bcbcdcda`。详见 [路由修复记录](ROUTING_VERIFICATION_ZH.md) 和 [热更新实测与旧版升级](HOT_RELOAD_ZH.md)。2026-10-16 起新装和已有标准服务统一使用上面的安装入口，不必安装后再运行 `upgrade-custom.sh`。新入口增加续期演练与成功后的加载检查，见 [一体安装与证书续期](SETUP_RENEWAL_ZH.md)。以下手动步骤仅供自行编译部署时参考，不需要在一键安装后重复执行。
 
 ## 1. 准备与备份
 
