@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"reflect"
-	"sort"
 	"sync"
 	"sync/atomic"
 	_ "unsafe"
@@ -81,6 +80,11 @@ type LimitDispatcher struct {
 	unlimitedIPs sync.Map // email → *ipCounter
 
 	connCount atomic.Int64 // total active connections tracked by dispatcher
+
+	// links holds live links per user email so they can be interrupted when
+	// the user is removed; removing a user from xray only blocks new auth.
+	linksMu sync.Mutex
+	links   map[string]map[*closeTrackingWriter]*transport.Link
 }
 
 // ipCounter tracks IPs for unlimited users without any lock.
@@ -103,73 +107,108 @@ func (ic *ipCounter) aliveIPs() map[string]bool {
 // ─── routing.Dispatcher ──────────────────────────────────────────────────────
 
 func (d *LimitDispatcher) Dispatch(ctx context.Context, dest net.Destination) (*transport.Link, error) {
-	email, sourceIP, isTCP, err := d.identifyAndCheck(ctx, dest)
+	email, sourceIP, err := d.identifyAndCheck(ctx, dest)
 	if err != nil {
 		return nil, err
 	}
 
 	link, err := d.innerDisp.Dispatch(ctx, dest)
 	if err != nil {
-		if email != "" && isTCP {
+		if email != "" {
 			d.delConn(email, sourceIP)
 		}
 		return nil, err
 	}
 
 	if email != "" {
-		d.trackLink(link, email, sourceIP, isTCP)
+		d.trackLink(link, email, sourceIP)
 	}
 	return link, nil
 }
 
 func (d *LimitDispatcher) DispatchLink(ctx context.Context, dest net.Destination, link *transport.Link) error {
-	email, sourceIP, isTCP, err := d.identifyAndCheck(ctx, dest)
+	email, sourceIP, err := d.identifyAndCheck(ctx, dest)
 	if err != nil {
 		return err
 	}
 
 	if email != "" {
-		d.trackLink(link, email, sourceIP, isTCP)
+		d.trackLink(link, email, sourceIP)
 	}
 	return d.innerDisp.DispatchLink(ctx, dest, link)
 }
 
 // identifyAndCheck extracts user identity from the session context, enforces
-// device limits, and returns the user's email, source IP, and TCP flag.
+// device limits and registers the source IP, returning the user's email and
+// source IP. TCP and UDP are both counted: UDP-only clients (QUIC, XUDP)
+// previously never occupied a device slot and bypassed the limit entirely.
 // Returns a non-nil error only when the connection should be rejected.
-func (d *LimitDispatcher) identifyAndCheck(ctx context.Context, dest net.Destination) (email, sourceIP string, isTCP bool, err error) {
+func (d *LimitDispatcher) identifyAndCheck(ctx context.Context, _ net.Destination) (email, sourceIP string, err error) {
 	si := session.InboundFromContext(ctx)
 	if si == nil || si.User == nil || len(si.User.Email) == 0 {
-		return "", "", false, nil
+		return "", "", nil
 	}
 	email = si.User.Email
 	sourceIP = si.Source.Address.IP().String()
-	isTCP = dest.Network == net.Network_TCP
 
-	if d.checkDeviceLimit(email, sourceIP, isTCP) {
+	if d.checkDeviceLimit(email, sourceIP) {
 		nlog.Core().Debug("xray: device limit exceeded", "email", email, "ip", sourceIP)
-		return "", "", false, errors.New("device limit exceeded for " + email)
+		return "", "", errors.New("device limit exceeded for " + email)
 	}
-	return email, sourceIP, isTCP, nil
+	return email, sourceIP, nil
 }
 
 // trackLink records connection lifecycle without mutating xray-core owned
 // transport primitives. This keeps mux/XUDP compatible while still allowing
 // the dispatcher to release device-limit state when the link closes.
-func (d *LimitDispatcher) trackLink(link *transport.Link, email, sourceIP string, isTCP bool) {
+func (d *LimitDispatcher) trackLink(link *transport.Link, email, sourceIP string) {
 	d.connCount.Add(1)
 
-	onClose := func() {
-		if isTCP {
-			d.delConn(email, sourceIP)
-		}
+	w := &closeTrackingWriter{Writer: link.Writer}
+	w.onClose = func() {
+		d.delConn(email, sourceIP)
+		d.untrackLink(email, w)
 		d.connCount.Add(-1)
 	}
+	link.Writer = w
 
-	link.Writer = &closeTrackingWriter{
-		Writer:  link.Writer,
-		onClose: onClose,
+	d.linksMu.Lock()
+	if d.links == nil {
+		d.links = make(map[string]map[*closeTrackingWriter]*transport.Link)
 	}
+	if d.links[email] == nil {
+		d.links[email] = make(map[*closeTrackingWriter]*transport.Link)
+	}
+	d.links[email][w] = link
+	d.linksMu.Unlock()
+}
+
+func (d *LimitDispatcher) untrackLink(email string, w *closeTrackingWriter) {
+	d.linksMu.Lock()
+	if m := d.links[email]; m != nil {
+		delete(m, w)
+		if len(m) == 0 {
+			delete(d.links, email)
+		}
+	}
+	d.linksMu.Unlock()
+}
+
+// CloseUser interrupts every live link of a user and returns how many were
+// interrupted. Both pipe ends are interrupted so the inbound and outbound
+// copy loops end immediately.
+func (d *LimitDispatcher) CloseUser(email string) int {
+	d.linksMu.Lock()
+	links := make([]*transport.Link, 0, len(d.links[email]))
+	for _, l := range d.links[email] {
+		links = append(links, l)
+	}
+	d.linksMu.Unlock()
+	for _, l := range links {
+		common.Interrupt(l.Writer)
+		common.Interrupt(l.Reader)
+	}
+	return len(links)
 }
 
 // ─── features.Feature (delegated) ───────────────────────────────────────────
@@ -266,96 +305,43 @@ func (d *LimitDispatcher) GetConnectionState() (aliveIPs map[int]map[string]bool
 
 // ─── Internal helpers ───────────────────────────────────────────────────────
 
-// checkDeviceLimit enforces per-user device limits.
+// checkDeviceLimit enforces per-user device limits and, when the connection
+// is admitted, registers its source IP. It returns true to reject.
 // Fast path: unlimited users use lock-free sync.Map.
-// Slow path: limited users use RWMutex with deterministic IP ordering.
-func (d *LimitDispatcher) checkDeviceLimit(email, sourceIP string, isTCP bool) bool {
+// Slow path: limited users check and register under one write lock, so
+// concurrent connections from new IPs cannot all pass before being counted.
+// A new IP is admitted only while the user has fewer distinct IPs than the
+// limit; earlier versions also admitted any IP sorting lexicographically
+// before the existing ones, which let users exceed the limit.
+func (d *LimitDispatcher) checkDeviceLimit(email, sourceIP string) bool {
 	d.mu.RLock()
 	limit, hasLimit := d.deviceLimits[email]
 	d.mu.RUnlock()
 
 	// Fast path: no device limit — use lock-free sync.Map.
 	if !hasLimit || limit <= 0 {
-		if isTCP {
-			v, _ := d.unlimitedIPs.LoadOrStore(email, &ipCounter{})
-			ic := v.(*ipCounter)
-
-			// Increment IP refcount atomically.
-			rv, _ := ic.ips.LoadOrStore(sourceIP, &atomic.Int64{})
-			rv.(*atomic.Int64).Add(1)
-		}
+		v, _ := d.unlimitedIPs.LoadOrStore(email, &ipCounter{})
+		ic := v.(*ipCounter)
+		rv, _ := ic.ips.LoadOrStore(sourceIP, &atomic.Int64{})
+		rv.(*atomic.Int64).Add(1)
 		return false
 	}
 
-	// Slow path: user has device limit — need deterministic ordering.
-	d.mu.RLock()
-	ips := d.limitedIPs[email]
-	if ips != nil && ips[sourceIP] > 0 {
-		d.mu.RUnlock()
-		if isTCP {
-			d.mu.Lock()
-			d.limitedIPs[email][sourceIP]++
-			d.mu.Unlock()
-		}
-		return false
-	}
-
-	if ips != nil && len(ips) < limit {
-		d.mu.RUnlock()
-		if isTCP {
-			d.mu.Lock()
-			if d.limitedIPs[email] == nil {
-				d.limitedIPs[email] = make(map[string]int)
-			}
-			d.limitedIPs[email][sourceIP]++
-			d.mu.Unlock()
-		}
-		return false
-	}
-	d.mu.RUnlock()
-
-	// Over limit — need write lock for deterministic check.
 	d.mu.Lock()
 	defer d.mu.Unlock()
-
-	// Re-check under write lock.
-	ips = d.limitedIPs[email]
+	ips := d.limitedIPs[email]
 	if ips == nil {
 		ips = make(map[string]int)
 		d.limitedIPs[email] = ips
 	}
-
-	if ips[sourceIP] > 0 {
-		if isTCP {
-			ips[sourceIP]++
+	if ips[sourceIP] == 0 && len(ips) >= limit {
+		if len(ips) == 0 {
+			delete(d.limitedIPs, email)
 		}
-		return false
+		return true
 	}
-
-	if len(ips) < limit {
-		if isTCP {
-			ips[sourceIP]++
-		}
-		return false
-	}
-
-	// Over limit — deterministic: allow lowest IPs lexicographically.
-	ipList := make([]string, 0, len(ips)+1)
-	for ip := range ips {
-		ipList = append(ipList, ip)
-	}
-	ipList = append(ipList, sourceIP)
-	sort.Strings(ipList)
-
-	for i := 0; i < limit && i < len(ipList); i++ {
-		if ipList[i] == sourceIP {
-			if isTCP {
-				ips[sourceIP]++
-			}
-			return false
-		}
-	}
-	return true
+	ips[sourceIP]++
+	return false
 }
 
 // delConn decrements the IP refcount when a connection closes.

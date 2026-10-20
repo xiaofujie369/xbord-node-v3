@@ -15,9 +15,9 @@ import (
 	"github.com/xtls/xray-core/common/protocol"
 	"github.com/xtls/xray-core/common/uuid"
 	xrayCore "github.com/xtls/xray-core/core"
+	featurebandwidth "github.com/xtls/xray-core/features/bandwidth"
 	"github.com/xtls/xray-core/features/inbound"
 	"github.com/xtls/xray-core/features/stats"
-	featurebandwidth "github.com/xtls/xray-core/features/bandwidth"
 	"github.com/xtls/xray-core/infra/conf/serial"
 	xrayProxy "github.com/xtls/xray-core/proxy"
 	"github.com/xtls/xray-core/proxy/shadowsocks"
@@ -32,8 +32,8 @@ import (
 	"github.com/cedar2025/xboard-node/internal/config"
 	"github.com/cedar2025/xboard-node/internal/kernel"
 	"github.com/cedar2025/xboard-node/internal/kernel/geodata"
-	"github.com/cedar2025/xboard-node/internal/nlog"
 	"github.com/cedar2025/xboard-node/internal/model"
+	"github.com/cedar2025/xboard-node/internal/nlog"
 )
 
 const (
@@ -90,7 +90,7 @@ func (x *Xray) Capabilities() kernel.Capabilities {
 		BuiltInTrafficStats:  true,
 		AliveIPTracking:      true,
 		ForceCloseConnection: false,
-		ForceCloseUser:       false,
+		ForceCloseUser:       true,
 	}
 }
 
@@ -207,6 +207,9 @@ func (x *Xray) Stop() {
 	x.limitDispatcher = nil
 	x.mu.Unlock()
 
+	if inst != nil {
+		closeListeners(inst)
+	}
 	if ld != nil {
 		drainConns(ld, drainTimeout)
 	}
@@ -250,8 +253,20 @@ func (x *Xray) CloseConnection(_ context.Context, _ string) error {
 	return nil
 }
 
-func (x *Xray) CloseUserConnections(_ context.Context, _ string) error {
-	// No-op: handled by RemoveUsers at the xray core level.
+func (x *Xray) CloseUserConnections(_ context.Context, uuid string) error {
+	x.mu.Lock()
+	ld := x.limitDispatcher
+	var email string
+	for _, u := range x.users {
+		if u.UUID == uuid {
+			email = userEmail(u.ID)
+			break
+		}
+	}
+	x.mu.Unlock()
+	if email != "" {
+		closeUserLinks(ld, email)
+	}
 	return nil
 }
 
@@ -314,7 +329,7 @@ func (x *Xray) AddUsers(users []model.UserSpec) (int, error) {
 		x.users = merged
 		x.mu.Unlock()
 		x.updateDispatcherLimits(merged)
-	x.updateBandwidthLimits(merged)
+		x.updateBandwidthLimits(merged)
 		return 0, nil
 	}
 
@@ -402,6 +417,7 @@ func (x *Xray) RemoveUsers(users []model.UserSpec) (int, error) {
 		}
 		return removed, nil
 	}
+	ld := x.limitDispatcher
 	x.mu.Unlock()
 
 	ctx := context.Background()
@@ -413,6 +429,7 @@ func (x *Xray) RemoveUsers(users []model.UserSpec) (int, error) {
 			continue
 		}
 		actualRemoved++
+		closeUserLinks(ld, email)
 	}
 
 	x.mu.Lock()
@@ -461,16 +478,29 @@ func (x *Xray) UpdateUsers(users []model.UserSpec) (added, removed int, err erro
 
 	proto := x.protocol
 	nc := x.nodeConfig
+	ld := x.limitDispatcher
+	oldUUID := make(map[int]string, len(x.users))
+	for _, u := range x.users {
+		oldUUID[u.ID] = u.UUID
+	}
 	x.mu.Unlock()
 
 	ctx := context.Background()
 
-	// Remove first, then add (order matters for UUID changes on same ID)
+	// Remove first, then add. A user whose UUID changed keeps the same
+	// email, so the old credential must be removed too or AddUser fails with
+	// "already exists" and the revoked UUID keeps working.
+	for _, u := range toAdd {
+		if old, ok := oldUUID[u.ID]; ok && old != u.UUID {
+			toRemove = append(toRemove, model.UserSpec{ID: u.ID, UUID: old})
+		}
+	}
 	for _, u := range toRemove {
 		email := userEmail(u.ID)
 		if err := um.RemoveUser(ctx, email); err != nil {
 			nlog.Core().Debug("xray: RemoveUser skipped in UpdateUsers", "user", u.ID, "error", err)
 		}
+		closeUserLinks(ld, email)
 	}
 	for _, u := range toAdd {
 		mu, err := toMemoryUser(proto, nc, u)
@@ -494,6 +524,17 @@ func (x *Xray) UpdateUsers(users []model.UserSpec) (added, removed int, err erro
 }
 
 var _ kernel.Kernel = (*Xray)(nil)
+
+// closeUserLinks ends the live connections of a removed user; xray's
+// UserManager.RemoveUser only rejects new handshakes.
+func closeUserLinks(ld *LimitDispatcher, email string) {
+	if ld == nil {
+		return
+	}
+	if n := ld.CloseUser(email); n > 0 {
+		nlog.Core().Info("xray: closed connections of removed user", "user", email, "connections", n)
+	}
+}
 
 // ─── Internal helpers ───────────────────────────────────────────────────────
 
@@ -675,6 +716,12 @@ func closeOld(inst *xrayCore.Instance, ld *LimitDispatcher) {
 	if inst == nil {
 		return
 	}
+	// xray binds with SO_REUSEPORT, so the old instance keeps receiving a
+	// share of new connections until its listeners close. Close them now;
+	// only established connections are left to drain. Otherwise, for up to
+	// the drain timeout, new clients could land on the old config (removed
+	// users still accepted, traffic missing from the new instance's stats).
+	closeListeners(inst)
 	go func() {
 		// 1. Drain connections gracefully (best effort, e.g. 5 minutes)
 		// We use a much longer timeout here than the default Stop() because
@@ -689,6 +736,21 @@ func closeOld(inst *xrayCore.Instance, ld *LimitDispatcher) {
 		}
 		nlog.Core().Debug("xray: old instance recycled")
 	}()
+}
+
+// closeListeners removes every tagged inbound handler of inst, closing its
+// listening sockets while established connections keep running.
+func closeListeners(inst *xrayCore.Instance) {
+	m, ok := inst.GetFeature(inbound.ManagerType()).(inbound.Manager)
+	if !ok {
+		return
+	}
+	ctx := context.Background()
+	for _, h := range m.ListHandlers(ctx) {
+		if tag := h.Tag(); tag != "" {
+			_ = m.RemoveHandler(ctx, tag)
+		}
+	}
 }
 
 // drainConns waits up to timeout for the dispatcher's active connections to

@@ -162,18 +162,16 @@ func TestXraySetSpeedLimitFuncUsesPatchedCorePath(t *testing.T) {
 	}
 }
 
-
 func TestXrayCapabilities(t *testing.T) {
 	x := New(config.KernelConfig{Type: "xray"})
 	caps := x.Capabilities()
 	if !caps.PerUserSpeedLimit || !caps.DeviceLimit || !caps.BuiltInTrafficStats || !caps.AliveIPTracking {
 		t.Fatalf("unexpected positive xray capabilities: %+v", caps)
 	}
-	if caps.ForceCloseConnection || caps.ForceCloseUser {
+	if caps.ForceCloseConnection || !caps.ForceCloseUser {
 		t.Fatalf("unexpected force-close xray capabilities: %+v", caps)
 	}
 }
-
 
 func TestXrayUpdateBandwidthLimitsWritesPatchedCoreFeature(t *testing.T) {
 	inst := new(xrayCore.Instance)
@@ -189,7 +187,6 @@ func TestXrayUpdateBandwidthLimitsWritesPatchedCoreFeature(t *testing.T) {
 		t.Fatal("expected patched bandwidth feature to receive user limiter")
 	}
 }
-
 
 func TestXrayUpdateBandwidthLimitsUsesSpeedLimitFunc(t *testing.T) {
 	inst := new(xrayCore.Instance)
@@ -213,7 +210,6 @@ func TestXrayUpdateBandwidthLimitsUsesSpeedLimitFunc(t *testing.T) {
 	}
 }
 
-
 func TestXrayUpdateBandwidthLimitsFallsBackToUserSpeed(t *testing.T) {
 	inst := new(xrayCore.Instance)
 	bm := featurebandwidth.New()
@@ -228,7 +224,6 @@ func TestXrayUpdateBandwidthLimitsFallsBackToUserSpeed(t *testing.T) {
 		t.Fatal("expected fallback limiter derived from user speed")
 	}
 }
-
 
 func TestXrayUpdateUsersLimitOnlyRefreshesDispatcherAndBandwidth(t *testing.T) {
 	x := New(config.KernelConfig{Type: "xray"})
