@@ -86,7 +86,11 @@ func (s *SingBox) replaceRuntimeLocked(data []byte, node *model.NodeSpec, users 
 		cancel()
 		return fmt.Errorf("missing rollback configuration: %w", err)
 	}
-	oldConfig["inbounds"] = []M{buildInbound(s.nodeConfig, s.users, s.tls)}
+	if inbound := buildInbound(s.nodeConfig, s.users, s.tls); inbound != nil {
+		oldConfig["inbounds"] = []M{inbound}
+	} else {
+		delete(oldConfig, "inbounds")
+	}
 	rollbackData, err := json.Marshal(oldConfig)
 	if err != nil {
 		instance.Close()

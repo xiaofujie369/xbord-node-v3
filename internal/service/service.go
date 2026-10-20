@@ -57,10 +57,14 @@ type Service struct {
 	pushInterval int // seconds
 	pullInterval int // seconds
 
-	lastUserHash   string     // hash of user list for change detection
-	lastConfigHash string     // hash of full config for change detection
-	pullBackoff    apiBackoff // backoff for panel pull failures
-	pushBackoff    apiBackoff // backoff for panel push failures
+	lastUserHash   string // hash of user list for change detection
+	lastConfigHash string // hash of full config for change detection
+	// failedConfigHash is the last config that could neither be reloaded nor
+	// restarted. It is not retried until the panel sends a different config,
+	// so a bad config does not disrupt the node on every poll.
+	failedConfigHash string
+	pullBackoff      apiBackoff // backoff for panel pull failures
+	pushBackoff      apiBackoff // backoff for panel push failures
 
 	// pushActive prevents overlapping push/pull goroutines.
 	pushActive atomic.Bool
@@ -543,7 +547,7 @@ func (s *Service) handleWSEvent(ctx context.Context, event controlplane.Event) {
 			return
 		}
 		newConfigHash := computeConfigHash(event.Config)
-		if newConfigHash == s.lastConfigHash {
+		if newConfigHash == s.lastConfigHash || newConfigHash == s.failedConfigHash {
 			return
 		}
 		if err := validateNodeRuntime(s.cfg, s.kernel.Protocols(), event.Config, s.cert.TLSCert()); err != nil {
@@ -612,6 +616,7 @@ func (s *Service) pullViaAPIAsync(ctx context.Context) {
 	}
 
 	currentConfigHash := s.lastConfigHash
+	failedConfigHash := s.failedConfigHash
 	certChanged := s.cert.CertRenewed()
 
 	go func() {
@@ -628,7 +633,7 @@ func (s *Service) pullViaAPIAsync(ctx context.Context) {
 		if snapshot.Config != nil {
 			result.config = snapshot.Config
 			result.configHash = computeConfigHash(snapshot.Config)
-			if result.configHash == currentConfigHash && !certChanged {
+			if (result.configHash == currentConfigHash || result.configHash == failedConfigHash) && !certChanged {
 				result.config = nil
 			}
 		}
@@ -741,6 +746,7 @@ func (s *Service) startKernel(nc *model.NodeSpec, users []model.UserSpec) bool {
 
 	s.appliedState.Config = nc
 	s.appliedState.Users = users
+	s.failedConfigHash = ""
 
 	// Initialize node logger on first successful start
 	if s.nodeLog == nil {
@@ -926,8 +932,11 @@ func (s *Service) applyChanges(ctx context.Context, configChanged, usersChanged 
 	if configChanged && s.kernel.IsRunning() {
 		if err := s.kernel.Reload(s.lastConfig, s.lastUsers, s.cert.TLSCert()); err != nil {
 			nlog.Core().Warn(fmt.Sprintf("reload failed, restarting: %v", err))
-			s.startKernel(s.lastConfig, s.lastUsers)
+			if !s.startKernel(s.lastConfig, s.lastUsers) {
+				s.revertToAppliedConfig()
+			}
 		} else {
+			s.failedConfigHash = ""
 			s.appliedState.Config = s.lastConfig
 			s.appliedState.Users = s.lastUsers
 			if s.nodeLog != nil {
@@ -935,7 +944,31 @@ func (s *Service) applyChanges(ctx context.Context, configChanged, usersChanged 
 			}
 		}
 	} else if !s.kernel.IsRunning() {
-		s.startKernel(s.lastConfig, s.lastUsers)
+		if !s.startKernel(s.lastConfig, s.lastUsers) {
+			s.revertToAppliedConfig()
+		}
+	}
+}
+
+// revertToAppliedConfig is called when a new config could neither be
+// reloaded nor started. The kernels restore their previous runtime on such
+// failures, so the service state must follow it: otherwise later restarts
+// (ensureRunning) would keep using the rejected config. If the kernel is
+// stopped, the last config that ran successfully is started again.
+func (s *Service) revertToAppliedConfig() {
+	failed := s.lastConfigHash
+	defer func() { s.failedConfigHash = failed }()
+	applied := s.appliedState.Config
+	if applied == nil || applied == s.lastConfig {
+		return
+	}
+	nlog.Core().Warn("new config rejected by kernel, keeping last working config")
+	s.metricsMu.Lock()
+	s.lastConfig = applied
+	s.metricsMu.Unlock()
+	s.lastConfigHash = computeConfigHash(applied)
+	if !s.kernel.IsRunning() {
+		s.startKernel(applied, s.lastUsers)
 	}
 }
 

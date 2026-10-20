@@ -21,6 +21,10 @@ type fakeKernel struct {
 	startErr  error
 	updateErr error
 	addErr    error
+	reloadErr error
+	// startErrFor, when set, decides per config whether Start fails.
+	startErrFor func(*model.NodeSpec) error
+	started     *model.NodeSpec
 
 	reloadCalls int
 	startCalls  int
@@ -42,10 +46,15 @@ func (f *fakeKernel) Capabilities() kernel.Capabilities { return kernel.Capabili
 func (f *fakeKernel) Start(nodeConfig *model.NodeSpec, users []model.UserSpec, tls kernel.TLSCert) error {
 	_, _, _ = nodeConfig, users, tls
 	f.startCalls++
-	if f.startErr != nil {
+	if f.startErrFor != nil {
+		if err := f.startErrFor(nodeConfig); err != nil {
+			return err
+		}
+	} else if f.startErr != nil {
 		return f.startErr
 	}
 	f.running = true
+	f.started = nodeConfig
 	return nil
 }
 func (f *fakeKernel) Stop()           { f.running = false }
@@ -53,7 +62,7 @@ func (f *fakeKernel) IsRunning() bool { return f.running }
 func (f *fakeKernel) Reload(nodeConfig *model.NodeSpec, users []model.UserSpec, tls kernel.TLSCert) error {
 	f.reloadCalls++
 	_, _, _ = nodeConfig, users, tls
-	return nil
+	return f.reloadErr
 }
 func (f *fakeKernel) AddUsers(users []model.UserSpec) (int, error) {
 	f.addCalls++
@@ -377,5 +386,55 @@ func TestAnyTLSRealityRejectUpdatePreservesActiveConfig(t *testing.T) {
 				t.Fatal("invalid update changed active config or called kernel")
 			}
 		})
+	}
+}
+
+// Regression: when a new config could neither be reloaded nor restarted, the
+// service still recorded it as current, so a later restart used the rejected
+// config, and the same config was re-applied (disrupting the node) on every
+// poll.
+func TestApplyChangesKeepsLastWorkingConfigWhenReloadAndRestartFail(t *testing.T) {
+	good := &model.NodeSpec{Protocol: "vless", ServerPort: 443}
+	bad := &model.NodeSpec{Protocol: "vless", ServerPort: 8443}
+	k := &fakeKernel{running: true, reloadErr: errors.New("bind: address already in use")}
+	k.startErrFor = func(nc *model.NodeSpec) error {
+		if nc == bad {
+			return errors.New("bind: address already in use")
+		}
+		return nil
+	}
+	s := newTestService(k)
+	users := []model.UserSpec{{ID: 1, UUID: "uuid-1"}}
+	s.updateUserState(users)
+	s.appliedState.Config = good
+	s.appliedState.Users = users
+
+	s.lastConfig = bad
+	s.lastConfigHash = computeConfigHash(bad)
+	s.applyChanges(context.Background(), true, false)
+
+	if s.lastConfig != good || s.lastConfigHash != computeConfigHash(good) {
+		t.Fatal("service state must revert to the last working config")
+	}
+	if s.failedConfigHash != computeConfigHash(bad) {
+		t.Fatal("rejected config must be remembered")
+	}
+
+	reloads, starts := k.reloadCalls, k.startCalls
+	s.handleWSEvent(context.Background(), controlplane.Event{Type: controlplane.EventSyncConfig, Config: bad})
+	if k.reloadCalls != reloads || k.startCalls != starts {
+		t.Fatal("the same rejected config must not be re-applied")
+	}
+
+	// If the kernel ended up stopped, the last working config is started.
+	k.running = false
+	s.lastConfig = bad
+	s.lastConfigHash = computeConfigHash(bad)
+	s.applyChanges(context.Background(), true, false)
+	if !k.running || k.started != good {
+		t.Fatal("kernel must be restarted with the last working config")
+	}
+	if s.failedConfigHash != computeConfigHash(bad) {
+		t.Fatal("successful fallback start must not forget the rejected config")
 	}
 }
