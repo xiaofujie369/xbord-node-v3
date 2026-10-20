@@ -5,12 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -30,7 +28,6 @@ const (
 	serviceName            = "xboard-node.service"
 	serviceFilePath        = "/etc/systemd/system/xboard-node.service"
 	defaultInstallRoot     = "/etc/xboard-node"
-	downloadBase           = "https://github.com/cedar2025/xboard-node/releases"
 )
 
 var (
@@ -54,7 +51,7 @@ type fileRootConfig struct {
 	WS        *config.WSConfig   `yaml:"ws,omitempty"`
 	Runtime   *fileRuntimeConfig `yaml:"runtime,omitempty"`
 	Cert      *config.CertConfig `yaml:"cert,omitempty"`
-	Instances []fileInstance      `yaml:"instances,omitempty"`
+	Instances []fileInstance     `yaml:"instances,omitempty"`
 }
 
 type fileInstance struct {
@@ -211,7 +208,7 @@ func printUsage() {
   xbctl bind remove <instance-id>
   xbctl bind remove-node --panel URL --node-id ID
   xbctl bind remove-machine --panel URL --machine-id ID
-  xbctl upgrade [--version VERSION]
+  xbctl upgrade [--version VERSION] [--repo OWNER/NAME] [--sha256 HEX --xbctl-sha256 HEX]
   xbctl uninstall [--purge] [--yes]
   xbctl version
 
@@ -381,137 +378,6 @@ func runBindAdd(mode string, args []string) error {
 	return nil
 }
 
-func runUpgrade(args []string) error {
-	if err := ensureRoot("upgrade"); err != nil {
-		return err
-	}
-
-	version := "latest"
-	for i := 0; i < len(args); i++ {
-		if args[i] == "--version" && i+1 < len(args) {
-			version = args[i+1]
-			i++
-		}
-	}
-
-	arch := runtime.GOARCH
-	if arch != "amd64" && arch != "arm64" {
-		return fmt.Errorf("unsupported architecture: %s", arch)
-	}
-
-	fmt.Println("Starting upgrade...")
-
-	binaryDir := filepath.Dir(defaultBinaryPath)
-	cliDir := filepath.Dir(defaultCLIPath)
-	newBinary := filepath.Join(binaryDir, ".xboard-node.new")
-	newCLI := filepath.Join(cliDir, ".xbctl.new")
-
-	binaryURL := resolveDownloadURL(fmt.Sprintf("xboard-node-linux-%s", arch), version)
-	cliURL := resolveDownloadURL(fmt.Sprintf("xbctl-linux-%s", arch), version)
-
-	fmt.Printf("Downloading %s...\n", binaryURL)
-	if err := downloadFile(binaryURL, newBinary); err != nil {
-		return fmt.Errorf("download binary: %w", err)
-	}
-
-	fmt.Printf("Downloading %s...\n", cliURL)
-	if err := downloadFile(cliURL, newCLI); err != nil {
-		os.Remove(newBinary)
-		return fmt.Errorf("download xbctl: %w", err)
-	}
-
-	if err := os.Chmod(newBinary, 0o755); err != nil {
-		return cleanupFiles(newBinary, newCLI, fmt.Errorf("chmod binary: %w", err))
-	}
-	if err := os.Chmod(newCLI, 0o755); err != nil {
-		return cleanupFiles(newBinary, newCLI, fmt.Errorf("chmod xbctl: %w", err))
-	}
-
-	// Validate downloaded binaries
-	if out, err := exec.Command(newBinary, "-v").CombinedOutput(); err != nil {
-		return cleanupFiles(newBinary, newCLI, fmt.Errorf("binary version check failed: %s", string(out)))
-	}
-	if out, err := exec.Command(newCLI, "version").CombinedOutput(); err != nil {
-		return cleanupFiles(newBinary, newCLI, fmt.Errorf("xbctl version check failed: %s", string(out)))
-	}
-
-	// Backup existing binaries
-	backupBinary := defaultBinaryPath + ".bak"
-	backupCLI := defaultCLIPath + ".bak"
-	// Backup existing binaries
-	if fileExists(defaultBinaryPath) {
-		if err := copyFile(defaultBinaryPath, backupBinary); err != nil {
-			return cleanupFiles(newBinary, newCLI, fmt.Errorf("backup binary: %w", err))
-		}
-	}
-	if fileExists(defaultCLIPath) {
-		if err := copyFile(defaultCLIPath, backupCLI); err != nil {
-			return cleanupFiles(newBinary, newCLI, fmt.Errorf("backup xbctl: %w", err))
-		}
-	}
-
-	// Atomic rename
-	if err := os.Rename(newBinary, defaultBinaryPath); err != nil {
-		return cleanupFiles(newBinary, newCLI, fmt.Errorf("replace binary: %w", err))
-	}
-	if err := os.Rename(newCLI, defaultCLIPath); err != nil {
-		if fileExists(backupBinary) {
-			os.Rename(backupBinary, defaultBinaryPath)
-		}
-		os.Remove(newCLI)
-		return fmt.Errorf("replace xbctl: %w", err)
-	}
-
-	// Recreate /usr/bin/xbctl symlink
-	os.Remove("/usr/bin/xbctl")
-	os.Symlink(defaultCLIPath, "/usr/bin/xbctl")
-
-	// Restart service
-	fmt.Println("Restarting service...")
-	runCommand("systemctl", "daemon-reload")
-	if err := runCommand("systemctl", "restart", serviceName); err != nil {
-		fmt.Println("Restart failed, rolling back...")
-		rollbackOK := true
-		if fileExists(backupBinary) {
-			if e := os.Rename(backupBinary, defaultBinaryPath); e != nil {
-				fmt.Printf("Warning: rollback binary failed: %v\n", e)
-				rollbackOK = false
-			}
-		}
-		if fileExists(backupCLI) {
-			if e := os.Rename(backupCLI, defaultCLIPath); e != nil {
-				fmt.Printf("Warning: rollback xbctl failed: %v\n", e)
-				rollbackOK = false
-			}
-		}
-		runCommand("systemctl", "daemon-reload")
-		if e := runCommand("systemctl", "restart", serviceName); e != nil {
-			return fmt.Errorf("upgrade and rollback restart both failed: %w", e)
-		}
-		if rollbackOK {
-			return errors.New("upgrade failed: service restart failed, rolled back successfully")
-		}
-		return errors.New("upgrade failed: partial rollback, check binary state manually")
-	}
-
-	// Clean up backups
-	os.Remove(backupBinary)
-	os.Remove(backupCLI)
-
-	// Update install-meta.json
-	newVer := "unknown"
-	if out, err := exec.Command(defaultBinaryPath, "-v").CombinedOutput(); err == nil {
-		newVer = strings.TrimSpace(string(out))
-	}
-	if root, err := loadWritableRootConfig(defaultConfigPath); err == nil {
-		instances, _ := root.NormalizeInstances()
-		writeInstallMetaVersioned(defaultMetaPath, root, newVer, latestInstanceID(instances))
-	}
-
-	fmt.Printf("Upgrade complete (version: %s)\n", newVer)
-	return nil
-}
-
 func runUninstall(args []string) error {
 	if err := ensureRoot("uninstall"); err != nil {
 		return err
@@ -590,38 +456,6 @@ func ensureRoot(cmd string) error {
 		return fmt.Errorf("%s requires root privileges; run with sudo", cmd)
 	}
 	return nil
-}
-
-func resolveDownloadURL(artifact, version string) string {
-	if version == "latest" {
-		return downloadBase + "/latest/download/" + artifact
-	}
-	return downloadBase + "/download/" + version + "/" + artifact
-}
-
-func downloadFile(url, dest string) error {
-	client := &http.Client{Timeout: 120 * time.Second}
-	resp, err := client.Get(url)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return fmt.Errorf("HTTP %d from %s", resp.StatusCode, url)
-	}
-	f, err := os.Create(dest)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	_, err = io.Copy(f, resp.Body)
-	return err
-}
-
-func cleanupFiles(a, b string, err error) error {
-	os.Remove(a)
-	os.Remove(b)
-	return err
 }
 
 func fileExists(path string) bool {

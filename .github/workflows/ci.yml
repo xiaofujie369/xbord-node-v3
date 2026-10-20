@@ -20,7 +20,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.25.7'
+          go-version-file: go.mod
           cache: true
 
       - name: Run tests
@@ -43,7 +43,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.25.7'
+          go-version-file: go.mod
           cache: true
 
       - name: Build
@@ -116,6 +116,12 @@ jobs:
         with:
           merge-multiple: true
           path: dist
+      - name: Generate checksums
+        # xbctl upgrade refuses releases without SHA256SUMS.
+        run: |
+          cd dist
+          sha256sum xboard-node-linux-amd64 xboard-node-linux-arm64 xbctl-linux-amd64 xbctl-linux-arm64 > SHA256SUMS
+          cat SHA256SUMS
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
@@ -126,3 +132,4 @@ jobs:
             dist/xboard-node-linux-arm64
             dist/xbctl-linux-amd64
             dist/xbctl-linux-arm64
+            dist/SHA256SUMS
