@@ -348,13 +348,22 @@ func applyPanelRoutes(cfg M, node *model.NodeSpec) {
 		return
 	}
 	// Keep the pre-existing SSRF protection ahead of terminal panel policies.
-	guards := buildRoutes(nil, nil, nil)["rules"].([]M)
+	guards := ssrfGuardRules()
 	var local []M
 	for _, r := range mapEntries(route["rules"]) {
-		if reflect.DeepEqual(r, guards[0]) || reflect.DeepEqual(r, guards[1]) {
+		if isGuardRule(r, guards) {
 			continue
 		}
 		local = append(local, r)
 	}
 	route["rules"] = append(append(append(resolving, guards...), traffic...), local...)
+}
+
+func isGuardRule(r M, guards []M) bool {
+	for _, g := range guards {
+		if reflect.DeepEqual(r, g) {
+			return true
+		}
+	}
+	return false
 }

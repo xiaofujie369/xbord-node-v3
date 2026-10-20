@@ -662,20 +662,8 @@ func buildRouting(rules []model.RouteRule, customRouteRules []model.CustomRouteR
 	}
 
 	xrayRules = append(xrayRules, M{
-		"type": "field",
-		"ip": []string{
-			"10.0.0.0/8",
-			"100.64.0.0/10",
-			"127.0.0.0/8",
-			"169.254.0.0/16",
-			"172.16.0.0/12",
-			"192.0.0.0/24",
-			"192.168.0.0/16",
-			"198.18.0.0/15",
-			"fc00::/7",
-			"fe80::/10",
-			"::1/128",
-		},
+		"type":        "field",
+		"ip":          kernel.BlockedCIDRs(),
 		"outboundTag": "block",
 	})
 
@@ -683,8 +671,11 @@ func buildRouting(rules []model.RouteRule, customRouteRules []model.CustomRouteR
 		xrayRules = append(xrayRules, compilePanelRouteRule(rule)...)
 	}
 
+	// IPOnDemand resolves domain destinations when the private-IP guard is
+	// evaluated; with AsIs a request for "localhost" or a wildcard DNS name
+	// pointing at 127.0.0.1 skipped the guard and reached the host.
 	return M{
-		"domainStrategy": "AsIs",
+		"domainStrategy": "IPOnDemand",
 		"rules":          xrayRules,
 	}
 }

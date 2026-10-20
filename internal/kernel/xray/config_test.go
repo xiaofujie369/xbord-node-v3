@@ -572,3 +572,23 @@ func TestExtractECHServerKeys(t *testing.T) {
 		})
 	}
 }
+
+// Regression: with domainStrategy AsIs the private-IP guard only applied to
+// IP literals, so "localhost" or wildcard DNS names reached the host; the
+// guard also missed 0.0.0.0/8 and ::/128.
+func TestBuildRouting_SSRFGuardCoversDomainsAndBypassRanges(t *testing.T) {
+	routing := buildRouting(nil, nil, nil)
+	if routing["domainStrategy"] != "IPOnDemand" {
+		t.Fatalf("domainStrategy = %v, want IPOnDemand so domain targets are resolved before the guard", routing["domainStrategy"])
+	}
+	ips := routing["rules"].([]M)[0]["ip"].([]string)
+	for _, want := range []string{"0.0.0.0/8", "127.0.0.0/8", "169.254.0.0/16", "::/128", "fe80::/10"} {
+		found := false
+		for _, ip := range ips {
+			found = found || ip == want
+		}
+		if !found {
+			t.Errorf("SSRF guard is missing %s", want)
+		}
+	}
+}

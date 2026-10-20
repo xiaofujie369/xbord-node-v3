@@ -615,11 +615,14 @@ func TestBuildRoutes_Default(t *testing.T) {
 	assertMapValue(t, route, "final", "direct")
 
 	rules := route["rules"].([]M)
-	if len(rules) < 2 {
-		t.Fatalf("expected at least 2 default rules, got %d", len(rules))
+	if len(rules) != 4 {
+		t.Fatalf("expected resolve + 3 guard rules, got %d", len(rules))
 	}
-	assertMapValue(t, rules[0], "outbound", "block")
+	assertMapValue(t, rules[0], "action", "resolve")
 	assertMapValue(t, rules[1], "outbound", "block")
+	assertMapValue(t, rules[2], "outbound", "block")
+	assertMapValue(t, rules[3], "outbound", "block")
+	assertMapValue(t, rules[3], "ip_is_private", true)
 }
 
 func TestBuildRoutes_WithCustomRules(t *testing.T) {
@@ -631,17 +634,17 @@ func TestBuildRoutes_WithCustomRules(t *testing.T) {
 	route := buildRoutes(testRouteRules(rules), nil, nil)
 	allRules := route["rules"].([]M)
 
-	if len(allRules) != 5 {
-		t.Fatalf("rules count: got %d, want 5", len(allRules))
+	if len(allRules) != 7 {
+		t.Fatalf("rules count: got %d, want 7", len(allRules))
 	}
 
-	assertMapValue(t, allRules[2], "outbound", "block")
-	if _, ok := allRules[2]["domain_suffix"]; !ok {
+	assertMapValue(t, allRules[4], "outbound", "block")
+	if _, ok := allRules[4]["domain_suffix"]; !ok {
 		t.Error("domain rule should use domain_suffix")
 	}
 
-	assertMapValue(t, allRules[3], "outbound", "block")
-	if _, ok := allRules[3]["ip_cidr"]; !ok {
+	assertMapValue(t, allRules[5], "outbound", "block")
+	if _, ok := allRules[5]["ip_cidr"]; !ok {
 		t.Error("IP rule should use ip_cidr")
 	}
 }
@@ -656,31 +659,31 @@ func TestBuildRoutes_MultiMatch(t *testing.T) {
 	route := buildRoutes(testRouteRules(rules), nil, nil)
 	allRules := route["rules"].([]M)
 
-	// 2 default private-IP rules + 1 domain rule + 1 CIDR rule + 1 domain rule = 5
-	if len(allRules) != 5 {
-		t.Fatalf("rules count: got %d, want 5", len(allRules))
+	// resolve + 3 guard rules + 1 domain rule + 1 CIDR rule + 1 domain rule = 7
+	if len(allRules) != 7 {
+		t.Fatalf("rules count: got %d, want 7", len(allRules))
 	}
 
-	// Rule #2 (index 2): domains from first route (wildcards stripped)
-	domains := allRules[2]["domain_suffix"].([]string)
+	// Rule #4 (index 4): domains from first route (wildcards stripped)
+	domains := allRules[4]["domain_suffix"].([]string)
 	if len(domains) != 2 || domains[0] != "evil.com" || domains[1] != "bad.org" {
 		t.Errorf("domain_suffix: got %v, want [evil.com bad.org]", domains)
 	}
-	assertMapValue(t, allRules[2], "outbound", "block")
+	assertMapValue(t, allRules[4], "outbound", "block")
 
-	// Rule #3 (index 3): CIDRs from first route
-	cidrs := allRules[3]["ip_cidr"].([]string)
+	// Rule #5 (index 5): CIDRs from first route
+	cidrs := allRules[5]["ip_cidr"].([]string)
 	if len(cidrs) != 1 || cidrs[0] != "192.168.1.0/24" {
 		t.Errorf("ip_cidr: got %v, want [192.168.1.0/24]", cidrs)
 	}
-	assertMapValue(t, allRules[3], "outbound", "block")
+	assertMapValue(t, allRules[5], "outbound", "block")
 
-	// Rule #4 (index 4): direct rule (wildcard stripped)
-	directDomains := allRules[4]["domain_suffix"].([]string)
+	// Rule #6 (index 6): direct rule (wildcard stripped)
+	directDomains := allRules[6]["domain_suffix"].([]string)
 	if len(directDomains) != 1 || directDomains[0] != "bypass.com" {
 		t.Errorf("direct domain_suffix: got %v, want [bypass.com]", directDomains)
 	}
-	assertMapValue(t, allRules[4], "outbound", "direct")
+	assertMapValue(t, allRules[6], "outbound", "direct")
 }
 
 func TestBuildRoutes_WithCustomRouteRules(t *testing.T) {
@@ -701,8 +704,8 @@ func TestBuildRoutes_WithCustomRouteRules(t *testing.T) {
 	}
 	route := buildRoutes(nil, customRules, nil)
 	allRules := route["rules"].([]M)
-	if len(allRules) != 9 {
-		t.Fatalf("rules count: got %d, want 9", len(allRules))
+	if len(allRules) != 11 {
+		t.Fatalf("rules count: got %d, want 11", len(allRules))
 	}
 	if allRules[0]["domain"].([]string)[0] != "full.example.com" {
 		t.Fatalf("unexpected exact domain rule: %v", allRules[0])
@@ -987,4 +990,28 @@ func TestBuildInbound_AnyTLS_Reality_NodeIsolation(t *testing.T) {
 	assertMapValue(t, two["tls"].(M)["reality"].(M), "private_key", "key-two")
 	assertMapValue(t, one["tls"].(M), "server_name", "one.example.com")
 	assertMapValue(t, two["tls"].(M), "server_name", "two.example.com")
+}
+
+// Regression: the guard only matched IP literals, so domain targets such as
+// "localhost" skipped it, and 0.0.0.0/8 / IPv4-mapped IPv6 were not covered.
+func TestBuildRoutes_SSRFGuardResolvesDomainsAndCoversBypassRanges(t *testing.T) {
+	rules := buildRoutes(nil, nil, nil)["rules"].([]M)
+	if rules[0]["action"] != "resolve" {
+		t.Fatalf("first guard rule = %v, want resolve so ip rules see domain targets", rules[0])
+	}
+	var cidrs []string
+	for _, r := range rules[1:] {
+		if v, ok := r["ip_cidr"].([]string); ok {
+			cidrs = append(cidrs, v...)
+		}
+	}
+	for _, want := range []string{"0.0.0.0/8", "127.0.0.0/8", "::/128", "::ffff:0:0/96"} {
+		found := false
+		for _, c := range cidrs {
+			found = found || c == want
+		}
+		if !found {
+			t.Errorf("SSRF guard is missing %s", want)
+		}
+	}
 }

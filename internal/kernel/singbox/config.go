@@ -162,29 +162,7 @@ func buildRoutes(panelRoutes []model.RouteRule, customRules []model.CustomRouteR
 	}
 
 	// Standard blocks for private IPv4 and IPv6 ranges to prevent SSRF.
-	rules = append(rules,
-		M{
-			"outbound": "block",
-			"ip_cidr": []string{
-				"10.0.0.0/8",
-				"100.64.0.0/10",
-				"127.0.0.0/8",
-				"169.254.0.0/16",
-				"172.16.0.0/12",
-				"192.0.0.0/24",
-				"192.168.0.0/16",
-				"198.18.0.0/15",
-			},
-		},
-		M{
-			"outbound": "block",
-			"ip_cidr": []string{
-				"fc00::/7",
-				"fe80::/10",
-				"::1/128",
-			},
-		},
-	)
+	rules = append(rules, ssrfGuardRules()...)
 
 	for _, pr := range panelRoutes {
 		rules = append(rules, compilePanelRouteRule(pr)...)
@@ -193,6 +171,20 @@ func buildRoutes(panelRoutes []model.RouteRule, customRules []model.CustomRouteR
 	return M{
 		"final": "direct",
 		"rules": rules,
+	}
+}
+
+// ssrfGuardRules resolves domain destinations first so the IP guards also
+// apply to names such as "localhost" or wildcard DNS pointing at private
+// addresses; without it sing-box only matches ip_cidr against IP literals.
+// The resolved addresses are reused by the outbound, so a second lookup
+// cannot be rebound to a different address.
+func ssrfGuardRules() []M {
+	return []M{
+		{"action": "resolve"},
+		{"outbound": "block", "ip_cidr": copyStrings(kernel.BlockedIPv4CIDRs)},
+		{"outbound": "block", "ip_cidr": append(copyStrings(kernel.BlockedIPv6CIDRs), kernel.BlockedIPv4MappedCIDR)},
+		{"outbound": "block", "ip_is_private": true},
 	}
 }
 

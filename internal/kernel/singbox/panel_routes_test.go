@@ -108,13 +108,13 @@ func TestPanelPoliciesScopeOrderingAndNoBroadening(t *testing.T) {
 	}}
 	cfg := buildConfig(config.KernelConfig{}, node, nil, kernel.TLSCert{})
 	rules := cfg["route"].(M)["rules"].([]M)
-	if len(rules) != 6 {
+	if len(rules) != 8 {
 		t.Fatalf("unexpected rules: %v", rules)
-	} // resolve + 2 guards + 3 terminal rules
-	if rules[3]["outbound"] != "direct" || rules[4]["action"] != "reject" || rules[5]["action"] != "reject" {
+	} // scoped resolve + 4 guard rules (resolve, IPv4, IPv6, private) + 3 terminal rules
+	if rules[5]["outbound"] != "direct" || rules[6]["action"] != "reject" || rules[7]["action"] != "reject" {
 		t.Fatal(rules)
 	}
-	for _, r := range rules[3:] {
+	for _, r := range rules[5:] {
 		if !reflect.DeepEqual(r["inbound"], []string{"vless-in"}) {
 			t.Fatal(r)
 		}
@@ -143,7 +143,7 @@ func TestPanelRoutesMergedLocalConfig(t *testing.T) {
 	}}
 	cfg := buildConfig(config.KernelConfig{CustomConfig: path}, node, nil, kernel.TLSCert{})
 	rules := cfg["route"].(M)["rules"].([]M)
-	if len(rules) != 5 || rules[3]["outbound"] != "local-proxy" || !reflect.DeepEqual(rules[3]["rule_set"], []string{"local-set"}) || !reflect.DeepEqual(rules[3]["inbound"], []string{"hysteria-in"}) {
+	if len(rules) != 7 || rules[5]["outbound"] != "local-proxy" || !reflect.DeepEqual(rules[5]["rule_set"], []string{"local-set"}) || !reflect.DeepEqual(rules[5]["inbound"], []string{"hysteria-in"}) {
 		t.Fatal(rules)
 	}
 	d := cfg["dns"].(M)
@@ -215,10 +215,10 @@ func TestPanelRoutesDNSAndProxyRuntime(t *testing.T) {
 		{Match: []string{"*"}, Action: "direct"},
 	}}
 	cfg := buildConfig(config.KernelConfig{CustomOutbound: []map[string]any{{"type": "http", "tag": "upstream", "server": "127.0.0.1", "server_port": upstreamPort}}}, node, nil, kernel.TLSCert{})
-	guards := buildRoutes(nil, nil, nil)["rules"].([]M)
+	guards := ssrfGuardRules()
 	var rules []M
 	for _, r := range cfg["route"].(M)["rules"].([]M) {
-		if !reflect.DeepEqual(r, guards[0]) && !reflect.DeepEqual(r, guards[1]) {
+		if !isGuardRule(r, guards) {
 			rules = append(rules, r)
 		}
 	}
