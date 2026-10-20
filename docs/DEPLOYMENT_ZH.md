@@ -1,5 +1,7 @@
 # Debian 13 安装与实测记录
 
+> **2026-10-21 更新**：经过完整测试的新版本（分支 `release/xbord-node-v3-tested`）请使用新的指南：[全新安装](FRESH_INSTALL_GUIDE_ZH.md)、[已有 VPS 升级](UPGRADE_GUIDE_ZH.md)。下面的 `install-custom.sh` 仍然只会安装旧版 `custom-hotreload-20261001`。
+
 本仓库 main 是定制 Xboard-Node；面板配套快照在 `codex/live-panel-anytls` 分支。旧 `codex/anytls-reality-panel` 分支保留不动。不要把面板分支覆盖到节点目录。
 
 本指南对应节点源码 417cd4f，面板源码 019677c。2026-09-27 已在 Debian 13 / amd64 上完成 AnyTLS TLS、AnyTLS REALITY、Hysteria2 TLS + Salamander 的实际代理连接和 HTTPS 下载验证。不是全部客户端、移动网络或同步功能的完整验收。
