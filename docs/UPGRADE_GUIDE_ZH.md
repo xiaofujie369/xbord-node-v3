@@ -9,13 +9,22 @@
 | 项目 | 值 |
 |---|---|
 | GitHub 分支 | `release/xbord-node-v3-tested` |
-| 程序代码提交 | `7dc66626bd7b4c4fa199716abafaba88be0639d1`（已推送到 GitHub，经过全部测试的版本） |
+| 程序版本 | GitHub Release [`v3.0.0`](https://github.com/xiaofujie369/xbord-node-v3/releases/tag/v3.0.0)，程序代码与经过全部测试的提交 `7dc66626bd7b4c4fa199716abafaba88be0639d1` 完全相同 |
+| 编译方式 | 由 **GitHub Actions 自动编译**（编译前先跑完全部单元测试），VPS 上**不编译**，只下载程序，几十秒完成，小内存 VPS 也能用 |
 | 升级脚本 | 仓库内 `scripts/xbnode-v3.sh`，SHA-256 见第 3 步 |
-| 获取方式 | 按上面的固定提交**从源码编译**。这个版本还没有 GitHub Release 二进制包，所以**旧的 `install-custom.sh` / `upgrade-custom.sh` 不能用来升级到这个版本**（它们只会装旧版 `custom-hotreload-20261001`）；上游的 `xbctl upgrade` 也不行，它会装上游版本，你的定制修改会丢失 |
+| 注意 | 旧的 `install-custom.sh` / `upgrade-custom.sh` 只会装旧版 `custom-hotreload-20261001`；上游的 `xbctl upgrade` 会装上游版本，定制修改会丢失。请用本指南的脚本 |
 
 **升级会保留什么**：面板地址、通讯密钥、节点 ID / 机器 ID、证书路径等所有配置都原样保留，脚本**不会改动配置文件**。用户数据存放在 XBoard 面板上，节点本地没有数据库，不受影响。
 
-**停机时间**：编译阶段旧节点照常服务，只有最后替换程序、重启服务这一下会短暂中断。隔离环境实测：升级期间每 0.2 秒探测一次，183 次中只有 2 次失败，**中断约 0.4 秒**。正在进行的连接会断开，客户端会自动重连。
+**停机时间**：下载阶段旧节点照常服务，只有最后替换程序、重启服务这一下会短暂中断。隔离环境实测：升级期间每 0.2 秒探测一次，183 次中只有 2 次失败，**中断约 0.4 秒**。正在进行的连接会断开，客户端会自动重连。
+
+## 一键升级命令（熟悉的话直接用）
+
+```bash
+apt-get update && apt-get install -y curl ca-certificates && curl -fsSL -o /root/xbnode-v3.sh https://raw.githubusercontent.com/xiaofujie369/xbord-node-v3/release/xbord-node-v3-tested/scripts/xbnode-v3.sh && echo "df8798769fdaa591705a74e021767a7bb6b64323c9f6da7f9c05d03cb9a4aa77  /root/xbnode-v3.sh" | sha256sum -c - && bash /root/xbnode-v3.sh upgrade
+```
+
+升级前会自动备份，新版本不能稳定运行时自动回滚。出问题时执行 `bash /root/xbnode-v3.sh rollback` 回到旧版本。下面是分步说明。
 
 ## 1. 判断现在的安装方式和版本
 
@@ -41,21 +50,18 @@ systemctl list-units --all --no-pager | grep -E 'xboard-node' ; ls -l /opt/xboar
 
 ## 2. 检查资源
 
+不需要编译，只要 `/root` 所在分区有约 300 MB 可用空间（新程序加备份）：
+
 ```bash
-free -m
 df -h /root
 ```
-
-- 编译时需要内存+交换合计约 2.6 GB。不够时，脚本会**自动创建 2 GB 临时交换文件**，用完自动删除。
-- `/root` 所在分区要有至少 6 GB 可用空间，编译完会释放。
-- 如果内存只有 512 MB，或者硬盘很小，请用第 5 步的「方法 B」，在别的机器上编译。
 
 ## 3. 下载升级脚本并校验
 
 ```bash
 apt-get update && apt-get install -y curl ca-certificates
 curl -fL -o /root/xbnode-v3.sh https://raw.githubusercontent.com/xiaofujie369/xbord-node-v3/release/xbord-node-v3-tested/scripts/xbnode-v3.sh
-echo "d707d6da3fa1b7260d1d95c12128aa73275f3865004406deab1bd326031422c3  /root/xbnode-v3.sh" | sha256sum -c -
+echo "df8798769fdaa591705a74e021767a7bb6b64323c9f6da7f9c05d03cb9a4aa77  /root/xbnode-v3.sh" | sha256sum -c -
 ```
 
 最后一行必须输出 `/root/xbnode-v3.sh: OK`。如果显示 `FAILED`，**停止操作**，脚本可能被篡改了，或者下载不完整。
@@ -90,8 +96,6 @@ ls -lh /root/xbnode-manual-backup-*.tar.gz
 
 ## 5. 升级
 
-### 方法 A：在本机编译并升级（推荐）
-
 ```bash
 bash /root/xbnode-v3.sh upgrade
 ```
@@ -99,44 +103,22 @@ bash /root/xbnode-v3.sh upgrade
 脚本会依次执行：
 
 1. 识别安装方式，显示当前版本。
-2. 下载 Go 并编译新版本。这段时间**旧节点照常服务**，大约 10 到 20 分钟。
+2. 从 GitHub Release 下载 v3.0.0 程序并校验 SHA-256（不符就停止，不动旧节点）。这段时间**旧节点照常服务**。
 3. 自动备份程序、配置目录和服务文件到 `/root/xbnode-v3-backup-日期-xxxx/`。
-4. 替换程序，重启服务（实测中断约 0.4 秒）。
+4. 替换程序，重启服务（实测中断约 0.4 秒）。标准布局会同时把 `xbctl` 更新为 v3.0.0。
 5. 等服务稳定运行 8 秒，确认成功。**如果新版本没能稳定运行，会自动回滚到旧版本。**
 
-看到下面的输出就是升级成功了：
+一般十几秒完成。看到下面的输出就是升级成功了：
 
 ```
-==> 升级完成：xboard-node v3-tested-7dc6662 (built 2026-10-20T20:21:39Z)。备份保留在 /root/xbnode-v3-backup-...
+==> 升级完成：xboard-node v3.0.0 (built 2026-10-21T01:35:02Z)。备份保留在 /root/xbnode-v3-backup-...
 ```
 
-**可选：核对编译结果。** 这个版本的编译是可复现的：同一个提交、同一个 Go 版本，在任何 x86_64 机器上编译出的 `xboard-node` 都完全相同。编译完成时脚本会显示 `sha256=...`，应该等于：
-
-```
-39ce3a3b292a4dc0a51c9d50c98844af89b65847a4e5aa10e2c8d931538c2914
-```
-
-### 方法 B：小内存 VPS，在另一台机器上编译后传过来
-
-在一台内存充足的 Debian/Ubuntu 机器上（root 身份）：
-
-```bash
-curl -fL -o /root/xbnode-v3.sh https://raw.githubusercontent.com/xiaofujie369/xbord-node-v3/release/xbord-node-v3-tested/scripts/xbnode-v3.sh
-bash /root/xbnode-v3.sh build
-scp /root/xbnode-v3-build/xboard-node root@要升级的VPS的IP:/root/xboard-node-v3
-```
-
-再到要升级的 VPS 上：
-
-```bash
-bash /root/xbnode-v3.sh upgrade --binary /root/xboard-node-v3
-```
-
-> 标准布局（`xboard-node.service`）用方法 B 时，只会替换节点程序，`xbctl` 命令保持原样。
+> 无法访问 GitHub 的机器：在能访问的电脑上从 [Release 页面](https://github.com/xiaofujie369/xbord-node-v3/releases/tag/v3.0.0) 下载 `xboard-node-linux-amd64`，传到 VPS 的 `/root/`，再执行 `bash /root/xbnode-v3.sh upgrade --binary /root/xboard-node-linux-amd64`（这种方式只替换节点程序，不更新 `xbctl`）。
 
 ## 6. 验证升级结果
 
-**6.1 版本和服务状态**：版本应该是 `v3-tested-7dc6662`，服务应该是 `active`：
+**6.1 版本和服务状态**：版本应该是 `v3.0.0`，服务应该是 `active`：
 
 ```bash
 bash /root/xbnode-v3.sh status
@@ -191,7 +173,7 @@ systemctl status xboard-node-custom --no-pager
 |---|---|
 | 脚本提示「没有找到已安装的节点」 | 你的安装不属于第 1 步表格里的两种布局，本指南不适用 |
 | 提示「同时检测到两种安装」 | 这台机器上同时有两套节点，需要先确认哪一套在用，手动停用另一套 |
-| 编译时提示磁盘不足或内存不足 | 改用第 5 步的方法 B |
+| 提示「下载失败」或「SHA-256 校验失败」 | 网络无法访问 GitHub 或下载不完整，旧节点没有被改动。稍后重试，或按第 5 步的提示手动下载后用 `--binary` |
 | 显示「已回滚到原版本并恢复运行」 | 新版本没能稳定运行。用 `journalctl -u 服务名 -n 100 --no-pager` 查看原因，旧版本已经恢复服务 |
 | 日志里有 `handshake status 403` | 通讯密钥不对。升级不会改配置，请检查面板上的通讯密钥最近是否改过 |
 | 升级后客户端连不上 | 先执行回滚确认问题是否和新版本有关，再查看日志 |
@@ -211,22 +193,27 @@ rm -rf /root/xbnode-v3-backup-要删除的那一个
 
 | 测试项 | 环境 | 结果 |
 |---|---|---|
-| 全新安装：自动装依赖、下载并校验 Go、拉取固定提交并核对、源码编译、写配置、创建服务和开机自启 | Debian 12 最小化系统（隔离环境） | ✅ 通过，耗时约 8 分钟 |
+| **v3.0.0 Release 全新安装**：从 GitHub 下载、校验 SHA-256、写配置、创建服务并开机自启，VPS 上没有安装 Go、没有编译 | Debian 12（隔离环境，内存限制 600 MB） | ✅ 通过，耗时 26 秒 |
+| **v3.0.0 Release 升级**：从旧版 `custom-hotreload-20261001`（`install-custom.sh` 布局）升级，配置不变；随后回滚 | Debian 12（隔离环境，内存限制 600 MB） | ✅ 通过，升级耗时 12 秒 |
+| **v3.0.0 Release 升级**：从上游 v1.13（`install.sh` 标准布局）升级，配置和 `credentials.env` 不变，`xbctl` 一并更新为 v3.0.0；随后回滚 | Ubuntu 24.04（隔离环境，内存限制 600 MB） | ✅ 通过，耗时约 12 秒 |
+| 下载的文件 SHA-256 不符时拒绝安装，旧节点不受影响 | Debian 12（隔离环境） | ✅ 通过 |
+| GitHub Actions：单元测试、amd64 / arm64 编译、生成 SHA256SUMS、发布 Release | GitHub | ✅ 全部成功 |
+
+下面几项是用同一份程序代码（提交 `7dc6662`）在本地编译的版本测的，功能代码与 v3.0.0 完全相同，只是版本号显示不同：
+
+| 测试项 | 环境 | 结果 |
+|---|---|---|
 | 安装后：用户认证、拒绝未知用户、TCP、UDP、SSRF 拦截、流量记账（500 万 TCP + 10 万 UDP 与面板记录一致） | Debian 12（隔离环境） | ✅ 通过 |
 | 重启机器后服务自动启动 | Debian 12（隔离环境） | ✅ 约 2 秒恢复 |
 | 从旧版 `custom-hotreload-20261001`（用 `install-custom.sh` 的布局）升级，配置文件完全不变 | Debian 12（隔离环境） | ✅ 通过 |
 | 升级中断时长 | Debian 12（隔离环境） | ✅ 实测约 0.4 秒 |
 | 手动回滚、新版本启动即崩溃时自动回滚 | Debian 12（隔离环境） | ✅ 通过 |
-| 从上游 v1.13（用真实 `xbctl config init` 生成的 `install.sh` 标准布局）源码编译升级，配置和 `credentials.env` 不变，`xbctl` 一并更新，编译文件自动清理，回滚 | Ubuntu 24.04（隔离环境） | ✅ 通过 |
 | 交互输入通讯密钥：屏幕、系统日志中都不出现密钥，只保存在权限 600 的配置文件里 | Ubuntu 24.04（隔离环境） | ✅ 通过 |
-| 方法 B：`build` 编译 + `--binary` 安装或升级 | 开发 VPS + Ubuntu 24.04 / Debian 12（隔离环境） | ✅ 通过 |
-| 内存不足时自动创建并删除 2 GB 临时交换文件 | 开发 VPS（Ubuntu 24.04，通过调高阈值强制触发） | ✅ 通过 |
-| 可复现编译：两台机器分别编译，SHA-256 完全一致 | 开发 VPS 与 Ubuntu 24.04 容器 | ✅ 通过 |
-| 错误输入（面板地址格式、节点 ID、节点类型、已安装/未安装、无备份时回滚等）被拒绝，且不会开始编译 | Ubuntu 24.04（隔离环境） | ✅ 通过 |
+| 错误输入（面板地址格式、节点 ID、节点类型、已安装/未安装、无备份时回滚等）被拒绝 | Ubuntu 24.04（隔离环境） | ✅ 通过 |
 | 卸载：`uninstall --purge`，两种布局 | Debian 12 / Ubuntu 24.04（隔离环境） | ✅ 通过 |
 | **用本脚本安装后对接真实 XBoard 面板**：WebSocket 连接、用户同步、认证、TCP、UDP，面板记账 3,100,117 字节，与实际流量 3,100,000 字节吻合 | 真实 XBoard（上游 `1f4e4e0`），测试节点和用户已删除 | ✅ 通过 |
 | Debian 13、Ubuntu 22.04 | — | ⚠️ 未测试 |
-| ARM64 架构 | — | ⚠️ 未测试 |
+| ARM64 架构 | — | ⚠️ 程序已由 GitHub 编译并发布，未在 ARM64 机器上实际运行 |
 | 真实云 VPS 整机安装（以上都在容器中完成） | — | ⚠️ 未测试 |
 | 需要 TLS 证书的节点（Trojan、Hysteria2、TUIC、VLESS+TLS 等） | — | ⚠️ 本轮未测试 |
 | machine 模式（机器 ID + 机器 token）的配置 | — | ⚠️ 未测试；升级不改配置，理论上不受影响 |

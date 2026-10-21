@@ -1,30 +1,28 @@
 #!/usr/bin/env bash
 # xbord-node-v3 tested release helper for Debian/Ubuntu with systemd.
-# Builds the pinned, tested source commit (or takes a prebuilt binary), then
-# installs, upgrades, rolls back or uninstalls the node service.
+# Downloads the prebuilt release binaries built by GitHub Actions (checked
+# against the SHA-256 values pinned below), then installs, upgrades, rolls
+# back or uninstalls the node service. Nothing is compiled on the VPS.
 #
-#   xbnode-v3.sh build                         build only, print the binary path
 #   xbnode-v3.sh install --panel-url URL --node-id N --node-type TYPE [--token-file F] [--binary F]
 #   xbnode-v3.sh upgrade [--binary F]          upgrade an existing installation in place
 #   xbnode-v3.sh rollback [BACKUP_DIR]         restore the latest (or given) backup
 #   xbnode-v3.sh uninstall [--purge]           remove the service; --purge also deletes config
 #   xbnode-v3.sh status
-#
-# Common options: --keep-build (keep the build directory), --no-temp-swap
-# (never create a temporary swap file for the build).
 set -Eeuo pipefail
 umask 077
 
-REPO_URL=https://github.com/xiaofujie369/xbord-node-v3.git
-BRANCH=release/xbord-node-v3-tested
-COMMIT=7dc66626bd7b4c4fa199716abafaba88be0639d1
-GO_VERSION=1.26.10
-declare -A GO_SHA256=(
-    [amd64]=ccfe7ae822d2c2f41f4fe7c956199967a4dac22d0ee0d2b2bfdb440aab3b20c5
-    [arm64]=3f4227ce7b206a513e794f1393adb473a07b46e94d18bd15d1c684bbb7319797
+RELEASE_TAG=v3.0.0
+RELEASE_URL=https://github.com/xiaofujie369/xbord-node-v3/releases/download/$RELEASE_TAG
+declare -A NODE_SHA256=(
+    [amd64]=48a20dc86f00ee8f6050df54a616da519ca39eaa9d34b9a381cb9110e1c09c2f
+    [arm64]=15bfcb32d91d4296549e13f35284d5f1700bc5b0b4854c2d822691ad9bcc9593
 )
-BUILD_TAGS="with_quic with_utls with_wireguard with_acme with_clash_api"
-BUILD_DIR=${XBNODE_BUILD_DIR:-/root/xbnode-v3-build}
+declare -A CLI_SHA256=(
+    [amd64]=4ee54b1914a796b8543dfce4d2eeeca1f625748f5c0469045ea4d32c3a729755
+    [arm64]=ad31c1b9412d46d6966809ec8b7e0cf7f6318845f49f1b757c10b5b7e619e540
+)
+WORK_DIR=${XBNODE_WORK_DIR:-/root/xbnode-v3-download}
 BACKUP_ROOT=/root
 
 # Layout created by install-custom.sh (also used for fresh installs here).
@@ -40,15 +38,9 @@ STD_UNIT=xboard-node.service
 say() { printf '==> %s\n' "$*"; }
 fail() { printf '错误：%s\n' "$*" >&2; exit 1; }
 
-PANEL_URL='' NODE_ID='' NODE_TYPE='' TOKEN_FILE='' BINARY='' KEEP_BUILD=0 TEMP_SWAP=1 PURGE=0 ROLLBACK_DIR=''
-SWAPFILE=''
+PANEL_URL='' NODE_ID='' NODE_TYPE='' TOKEN_FILE='' BINARY='' CLI_BINARY='' PURGE=0 ROLLBACK_DIR=''
 
-cleanup() {
-    if [[ -n $SWAPFILE && -f $SWAPFILE ]]; then
-        swapoff "$SWAPFILE" 2>/dev/null || true
-        rm -f "$SWAPFILE"
-    fi
-}
+cleanup() { rm -rf "$WORK_DIR"; }
 trap cleanup EXIT
 
 parse_args() {
@@ -59,8 +51,6 @@ parse_args() {
         --node-type) NODE_TYPE=${2:-}; shift 2 ;;
         --token-file) TOKEN_FILE=${2:-}; shift 2 ;;
         --binary) BINARY=${2:-}; shift 2 ;;
-        --keep-build) KEEP_BUILD=1; shift ;;
-        --no-temp-swap) TEMP_SWAP=0; shift ;;
         --purge) PURGE=1; shift ;;
         -*) fail "未知参数 $1" ;;
         *) ROLLBACK_DIR=$1; shift ;;
@@ -106,75 +96,27 @@ ensure_packages() {
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${missing[@]}" >/dev/null
 }
 
-# The build peaks around 1.1 GB of memory and needs ~5 GB of disk.
-prepare_build_resources() {
-    mkdir -p "$BUILD_DIR"
-    local avail_kb mem_mb
-    avail_kb=$(df --output=avail -k "$BUILD_DIR" | tail -1)
-    ((avail_kb >= 6 * 1024 * 1024)) || fail "编译需要至少 6 GB 可用磁盘（$BUILD_DIR 所在分区不足）"
-    mem_mb=$(awk '/MemTotal|SwapTotal/ {s+=$2} END {print int(s/1024)}' /proc/meminfo)
-    local need=${XBNODE_MIN_MEM_MB:-2600}
-    if ((mem_mb < need)); then
-        ((TEMP_SWAP)) || fail "内存+交换仅 ${mem_mb} MB，编译至少需要 ${need} MB；可去掉 --no-temp-swap 或改用 --binary"
-        SWAPFILE=$BUILD_DIR/temp-build.swap
-        say "内存+交换仅 ${mem_mb} MB，临时创建 2 GB 交换文件（编译结束自动删除）"
-        fallocate -l 2G "$SWAPFILE" 2>/dev/null || dd if=/dev/zero of="$SWAPFILE" bs=1M count=2048 status=none
-        chmod 600 "$SWAPFILE"
-        mkswap "$SWAPFILE" >/dev/null
-        swapon "$SWAPFILE" || fail '无法启用临时交换文件；请改用 --binary 安装在别处编译好的程序'
-    fi
-}
-
-build_binary() {
-    ensure_packages ca-certificates curl git
-    prepare_build_resources
-    local go_tgz=$BUILD_DIR/go.tar.gz
-    say "下载 Go $GO_VERSION 并校验 SHA-256"
-    curl -fsSL --retry 3 --proto '=https' -o "$go_tgz" "https://go.dev/dl/go${GO_VERSION}.linux-${ARCH}.tar.gz"
-    echo "${GO_SHA256[$ARCH]}  $go_tgz" | sha256sum -c --quiet -
-    rm -rf "$BUILD_DIR/go" && tar -C "$BUILD_DIR" -xzf "$go_tgz" && rm -f "$go_tgz"
-
-    say "获取源码 $BRANCH @ ${COMMIT:0:7}"
-    rm -rf "$BUILD_DIR/src"
-    git clone -q --filter=blob:none --branch "$BRANCH" "$REPO_URL" "$BUILD_DIR/src"
-    git -C "$BUILD_DIR/src" checkout -q --detach "$COMMIT"
-    [[ $(git -C "$BUILD_DIR/src" rev-parse HEAD) == "$COMMIT" ]] || fail '源码提交与固定版本不一致'
-
-    say '开始编译（低优先级运行，约 5-15 分钟，不影响正在运行的节点继续服务）'
-    local procs=1 mem_mb
-    mem_mb=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)
-    ((mem_mb >= 3000)) && procs=2
-    (
-        cd "$BUILD_DIR/src"
-        export PATH=$BUILD_DIR/go/bin:$PATH GOPATH=$BUILD_DIR/gopath GOCACHE=$BUILD_DIR/gocache \
-            GOTOOLCHAIN=local CGO_ENABLED=0 GOFLAGS=-p=$procs GOMAXPROCS=$procs
-        # The commit time (not the wall clock) keeps the build reproducible: the
-        # same commit gives a byte-identical binary on every machine.
-        local ld built
-        built=$(TZ=UTC git log -1 --date=format-local:%Y-%m-%dT%H:%M:%SZ --format=%cd)
-        ld="-s -w -buildid= -X main.version=v3-tested-${COMMIT:0:7} -X main.buildTime=$built"
-        nice -n 19 go build -trimpath -ldflags "$ld" -tags "$BUILD_TAGS" -o "$BUILD_DIR/xboard-node" ./cmd/xboard-node
-        nice -n 19 go build -trimpath -ldflags "$ld" -o "$BUILD_DIR/xbctl" ./cmd/xbctl
-    )
-    "$BUILD_DIR/xboard-node" -v
-    BINARY=$BUILD_DIR/xboard-node
-    say "编译完成：$BINARY  sha256=$(sha256sum "$BINARY" | cut -d' ' -f1)"
-}
-
-clean_build() {
-    if ((KEEP_BUILD == 0)) && [[ -d $BUILD_DIR ]]; then
-        rm -rf "$BUILD_DIR/go" "$BUILD_DIR/gopath" "$BUILD_DIR/gocache" "$BUILD_DIR/src"
-    fi
+# fetch NAME SHA256: downloads one release asset into $WORK_DIR and verifies it.
+fetch() {
+    local out=$WORK_DIR/$1
+    curl -fsSL --retry 3 --proto '=https' -o "$out" "$RELEASE_URL/$1" || fail "下载失败：$RELEASE_URL/$1"
+    echo "$2  $out" | sha256sum -c --quiet - || fail "$1 的 SHA-256 校验失败，已停止"
+    chmod 755 "$out"
 }
 
 obtain_binary() {
     if [[ -n $BINARY ]]; then
         [[ -f $BINARY ]] || fail "找不到 $BINARY"
         chmod 755 "$BINARY"
-        "$BINARY" -v >/dev/null || fail "$BINARY 无法运行（架构不符或文件损坏）"
     else
-        build_binary
+        ensure_packages ca-certificates curl
+        rm -rf "$WORK_DIR" && mkdir -p "$WORK_DIR"
+        say "下载 GitHub 编译好的 $RELEASE_TAG（$ARCH）并校验 SHA-256"
+        fetch "xboard-node-linux-$ARCH" "${NODE_SHA256[$ARCH]}"
+        fetch "xbctl-linux-$ARCH" "${CLI_SHA256[$ARCH]}"
+        BINARY=$WORK_DIR/xboard-node-linux-$ARCH CLI_BINARY=$WORK_DIR/xbctl-linux-$ARCH
     fi
+    "$BINARY" -v >/dev/null || fail "$BINARY 无法运行（架构不符或文件损坏）"
 }
 
 # Waits until the unit has stayed active for 8 consecutive seconds.
@@ -222,15 +164,14 @@ cmd_upgrade() {
     set_layout_vars "$LAYOUT"
     say "检测到 $LAYOUT 布局：$BIN（服务 $UNIT），当前版本：$("$BIN" -v 2>&1 || true)"
     systemctl is-active --quiet "$UNIT" || say "提示：$UNIT 当前未运行，升级后会尝试启动"
-    obtain_binary   # the old node keeps serving while this builds
+    obtain_binary   # the old node keeps serving while this downloads
     backup_install
     say '替换程序并重启服务（实测中断通常不到 1 秒）'
     replace_file "$BINARY" "$BIN"
-    [[ -n $CLI && -f $BUILD_DIR/xbctl && -z ${BINARY_FROM_ARG:-} ]] && replace_file "$BUILD_DIR/xbctl" "$CLI"
+    [[ -n $CLI && -n $CLI_BINARY ]] && replace_file "$CLI_BINARY" "$CLI"
     systemctl restart "$UNIT"
     if wait_healthy "$UNIT"; then
         say "升级完成：$("$BIN" -v)。备份保留在 $BACKUP"
-        clean_build
     else
         say '新版本未能稳定运行，正在自动回滚……'
         journalctl -u "$UNIT" -n 30 --no-pager 2>/dev/null || true
@@ -302,7 +243,6 @@ SERVICE
     if wait_healthy "$UNIT"; then
         say "安装完成并已设置开机自启：$("$BIN" -v)"
         say "查看日志：journalctl -u $UNIT -f"
-        clean_build
     else
         journalctl -u "$UNIT" -n 30 --no-pager || true
         fail '服务启动后未能稳定运行，请按指南「排错」检查面板地址、节点 ID、类型和通讯密钥'
@@ -350,15 +290,13 @@ main() {
     local cmd=${1:-}
     shift || true
     parse_args "$@"
-    [[ -n $BINARY ]] && BINARY_FROM_ARG=1
     case $cmd in
-    build) preflight; build_binary; KEEP_BUILD=1 ;;
     install) preflight; cmd_install ;;
     upgrade) preflight; cmd_upgrade ;;
     rollback) preflight; cmd_rollback ;;
     uninstall) preflight; cmd_uninstall ;;
     status) cmd_status ;;
-    *) sed -n '2,15p' "$0"; exit 2 ;;
+    *) sed -n '2,11p' "$0"; exit 2 ;;
     esac
 }
 main "$@"

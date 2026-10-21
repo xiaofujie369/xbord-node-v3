@@ -9,11 +9,22 @@
 | 项目 | 值 |
 |---|---|
 | GitHub 分支 | `release/xbord-node-v3-tested` |
-| 程序代码提交 | `7dc66626bd7b4c4fa199716abafaba88be0639d1`（已推送到 GitHub，经过全部测试的版本） |
+| 程序版本 | GitHub Release [`v3.0.0`](https://github.com/xiaofujie369/xbord-node-v3/releases/tag/v3.0.0)，程序代码与经过全部测试的提交 `7dc66626bd7b4c4fa199716abafaba88be0639d1` 完全相同 |
+| 编译方式 | 由 **GitHub Actions 自动编译**（编译前先跑完全部单元测试），VPS 上**不编译**，只下载程序，几十秒完成，小内存 VPS 也能用 |
 | 安装脚本 | 仓库内 `scripts/xbnode-v3.sh`，SHA-256 见第 3 步 |
-| 获取方式 | 脚本在 VPS 上**按上面的固定提交从源码编译**。这个版本**还没有发布 GitHub Release 二进制包**，所以不能用旧的 `install-custom.sh`（它只会装旧版 `custom-hotreload-20261001`） |
+| 注意 | 不要用旧的 `install-custom.sh`，它只会装旧版 `custom-hotreload-20261001` |
 
-脚本做的事情：安装依赖 → 下载官方 Go 1.26.10 并校验 SHA-256 → 从 GitHub 拉取固定提交的源码并核对提交号 → 编译 → 写入配置 → 创建 systemd 服务并设置开机自启 → 等待服务稳定运行。编译用的临时文件在结束后自动删除。
+脚本做的事情：从 GitHub Release 下载 v3.0.0 程序 → 用脚本里写死的 SHA-256 校验（不符就停止）→ 写入配置 → 创建 systemd 服务并设置开机自启 → 等待服务稳定运行。
+
+## 一键安装命令（熟悉的话直接用）
+
+先在面板上准备好节点（第 2 步），然后把命令里的面板地址、节点 ID、节点类型换成你自己的：
+
+```bash
+apt-get update && apt-get install -y curl ca-certificates && curl -fsSL -o /root/xbnode-v3.sh https://raw.githubusercontent.com/xiaofujie369/xbord-node-v3/release/xbord-node-v3-tested/scripts/xbnode-v3.sh && echo "df8798769fdaa591705a74e021767a7bb6b64323c9f6da7f9c05d03cb9a4aa77  /root/xbnode-v3.sh" | sha256sum -c - && bash /root/xbnode-v3.sh install --panel-url https://你的面板域名 --node-id 1 --node-type vless
+```
+
+脚本会提示粘贴通讯密钥（输入不显示）。下面是分步说明。
 
 ## 1. 系统要求
 
@@ -24,12 +35,10 @@
 | CPU 架构 | x86_64（amd64） | ✅ 已测试 |
 | CPU 架构 | ARM64 | ⚠️ 脚本支持，但未测试 |
 | 权限 | root | 必需 |
-| 内存 | 编译时需要约 1.1 GB；内存+交换不足 2.6 GB 时，脚本会**自动创建 2 GB 临时交换文件**，编译完自动删除 | ✅ 已测试 |
-| 硬盘 | 编译时至少 6 GB 可用空间（结束后释放） | 脚本会检查 |
-| 网络 | 能访问 github.com、go.dev、proxy.golang.org | 必需 |
+| 内存 | 不编译，只运行节点；隔离环境在 600 MB 内存限制下完成安装和测试 | ✅ 已测试 |
+| 硬盘 | 约 150 MB 可用空间 | — |
+| 网络 | 能访问 github.com、raw.githubusercontent.com | 必需 |
 | 面板 | XBoard，并能用管理员账号登录后台 | 已用 XBoard（上游 `1f4e4e0`）实测 |
-
-内存只有 512 MB、硬盘很小的机器，建议在另一台机器上编译，再把程序传过来，见第 5 步的「方法 B」。
 
 ## 2. 在 XBoard 后台准备节点
 
@@ -75,7 +84,7 @@ curl -fL -o /root/xbnode-v3.sh https://raw.githubusercontent.com/xiaofujie369/xb
 校验脚本没有被篡改（输出 `OK` 才能继续；如果显示 `FAILED`，请停止并联系维护者）：
 
 ```bash
-echo "d707d6da3fa1b7260d1d95c12128aa73275f3865004406deab1bd326031422c3  /root/xbnode-v3.sh" | sha256sum -c -
+echo "df8798769fdaa591705a74e021767a7bb6b64323c9f6da7f9c05d03cb9a4aa77  /root/xbnode-v3.sh" | sha256sum -c -
 ```
 
 ## 4. 放行防火墙端口
@@ -102,8 +111,6 @@ ufw status
 
 ## 5. 安装
 
-### 方法 A：在本机编译并安装（推荐，最简单）
-
 把下面三个值换成你自己的：
 
 - `https://你的面板域名`：面板网址的根地址，**末尾不要加 `/`**。
@@ -116,33 +123,13 @@ bash /root/xbnode-v3.sh install --panel-url https://你的面板域名 --node-id
 
 脚本会提示：`请粘贴面板「系统配置 → 节点配置 → 通讯密钥」（输入不显示）`。粘贴第 2.1 步的通讯密钥，按回车。**输入时屏幕上什么都不显示，这是正常的。**
 
-整个过程大约 10 到 20 分钟，大部分时间在编译。看到下面这样的输出就是成功了：
+一般不到 1 分钟就能完成。看到下面这样的输出就是成功了：
 
 ```
-==> 安装完成并已设置开机自启：xboard-node v3-tested-7dc6662 (built 2026-10-20T20:21:39Z)
+==> 安装完成并已设置开机自启：xboard-node v3.0.0 (built 2026-10-21T01:35:02Z)
 ```
 
-**可选：核对编译结果。** 这个版本的编译是可复现的：同一个提交、同一个 Go 版本，在任何 x86_64 机器上编译出的 `xboard-node` 都完全相同。编译完成时脚本会显示 `sha256=...`，应该等于：
-
-```
-39ce3a3b292a4dc0a51c9d50c98844af89b65847a4e5aa10e2c8d931538c2914
-```
-
-### 方法 B：小内存 VPS，在另一台机器上编译后传过来
-
-在一台内存充足的 Debian/Ubuntu 机器上（以 root 身份）执行：
-
-```bash
-curl -fL -o /root/xbnode-v3.sh https://raw.githubusercontent.com/xiaofujie369/xbord-node-v3/release/xbord-node-v3-tested/scripts/xbnode-v3.sh
-bash /root/xbnode-v3.sh build
-scp /root/xbnode-v3-build/xboard-node root@新VPS的IP:/root/xboard-node-v3
-```
-
-再回到新 VPS 上安装，用 `--binary` 指定传过来的程序：
-
-```bash
-bash /root/xbnode-v3.sh install --panel-url https://你的面板域名 --node-id 1 --node-type vless --binary /root/xboard-node-v3
-```
+> 无法访问 GitHub 的机器：在能访问的电脑上从 [Release 页面](https://github.com/xiaofujie369/xbord-node-v3/releases/tag/v3.0.0) 下载 `xboard-node-linux-amd64`，传到 VPS 的 `/root/`，安装命令末尾加上 `--binary /root/xboard-node-linux-amd64`。
 
 ## 6. 检查是否安装成功
 
@@ -187,7 +174,7 @@ ss -tulnp | grep 443
 | 日志里有 `Server does not exist` | 节点 ID 或类型和面板不一致。修改配置里的 `node_id` 和 `node_type`，然后重启 |
 | 日志里一直没有 `started` | 面板上这个节点的权限组里还没有可用用户。至少要有一个未过期、未封禁、流量未用完的用户 |
 | 客户端连不上，日志正常 | 第 4 步的防火墙或安全组没放行，或者客户端用的端口和服务端口不一致 |
-| 编译时提示内存或磁盘不足 | 改用第 5 步的方法 B |
+| 提示「下载失败」或「SHA-256 校验失败」 | 网络无法访问 GitHub 或下载不完整，稍后重试；仍失败就按第 5 步的提示手动下载后用 `--binary` |
 
 修改配置文件可以用 nano 编辑器：执行 `nano /etc/xboard-node-custom/config.yml`，改完按 `Ctrl+O` 回车保存，再按 `Ctrl+X` 退出。
 
@@ -221,22 +208,27 @@ bash /root/xbnode-v3.sh uninstall --purge
 
 | 测试项 | 环境 | 结果 |
 |---|---|---|
-| 全新安装：自动装依赖、下载并校验 Go、拉取固定提交并核对、源码编译、写配置、创建服务和开机自启 | Debian 12 最小化系统（隔离环境） | ✅ 通过，耗时约 8 分钟 |
+| **v3.0.0 Release 全新安装**：从 GitHub 下载、校验 SHA-256、写配置、创建服务并开机自启，VPS 上没有安装 Go、没有编译 | Debian 12（隔离环境，内存限制 600 MB） | ✅ 通过，耗时 26 秒 |
+| **v3.0.0 Release 升级**：从旧版 `custom-hotreload-20261001`（`install-custom.sh` 布局）升级，配置不变；随后回滚 | Debian 12（隔离环境，内存限制 600 MB） | ✅ 通过，升级耗时 12 秒 |
+| **v3.0.0 Release 升级**：从上游 v1.13（`install.sh` 标准布局）升级，配置和 `credentials.env` 不变，`xbctl` 一并更新为 v3.0.0；随后回滚 | Ubuntu 24.04（隔离环境，内存限制 600 MB） | ✅ 通过，耗时约 12 秒 |
+| 下载的文件 SHA-256 不符时拒绝安装，旧节点不受影响 | Debian 12（隔离环境） | ✅ 通过 |
+| GitHub Actions：单元测试、amd64 / arm64 编译、生成 SHA256SUMS、发布 Release | GitHub | ✅ 全部成功 |
+
+下面几项是用同一份程序代码（提交 `7dc6662`）在本地编译的版本测的，功能代码与 v3.0.0 完全相同，只是版本号显示不同：
+
+| 测试项 | 环境 | 结果 |
+|---|---|---|
 | 安装后：用户认证、拒绝未知用户、TCP、UDP、SSRF 拦截、流量记账（500 万 TCP + 10 万 UDP 与面板记录一致） | Debian 12（隔离环境） | ✅ 通过 |
 | 重启机器后服务自动启动 | Debian 12（隔离环境） | ✅ 约 2 秒恢复 |
 | 从旧版 `custom-hotreload-20261001`（用 `install-custom.sh` 的布局）升级，配置文件完全不变 | Debian 12（隔离环境） | ✅ 通过 |
 | 升级中断时长 | Debian 12（隔离环境） | ✅ 实测约 0.4 秒 |
 | 手动回滚、新版本启动即崩溃时自动回滚 | Debian 12（隔离环境） | ✅ 通过 |
-| 从上游 v1.13（用真实 `xbctl config init` 生成的 `install.sh` 标准布局）源码编译升级，配置和 `credentials.env` 不变，`xbctl` 一并更新，编译文件自动清理，回滚 | Ubuntu 24.04（隔离环境） | ✅ 通过 |
 | 交互输入通讯密钥：屏幕、系统日志中都不出现密钥，只保存在权限 600 的配置文件里 | Ubuntu 24.04（隔离环境） | ✅ 通过 |
-| 方法 B：`build` 编译 + `--binary` 安装或升级 | 开发 VPS + Ubuntu 24.04 / Debian 12（隔离环境） | ✅ 通过 |
-| 内存不足时自动创建并删除 2 GB 临时交换文件 | 开发 VPS（Ubuntu 24.04，通过调高阈值强制触发） | ✅ 通过 |
-| 可复现编译：两台机器分别编译，SHA-256 完全一致 | 开发 VPS 与 Ubuntu 24.04 容器 | ✅ 通过 |
-| 错误输入（面板地址格式、节点 ID、节点类型、已安装/未安装、无备份时回滚等）被拒绝，且不会开始编译 | Ubuntu 24.04（隔离环境） | ✅ 通过 |
+| 错误输入（面板地址格式、节点 ID、节点类型、已安装/未安装、无备份时回滚等）被拒绝 | Ubuntu 24.04（隔离环境） | ✅ 通过 |
 | 卸载：`uninstall --purge`，两种布局 | Debian 12 / Ubuntu 24.04（隔离环境） | ✅ 通过 |
 | **用本脚本安装后对接真实 XBoard 面板**：WebSocket 连接、用户同步、认证、TCP、UDP，面板记账 3,100,117 字节，与实际流量 3,100,000 字节吻合 | 真实 XBoard（上游 `1f4e4e0`），测试节点和用户已删除 | ✅ 通过 |
 | Debian 13、Ubuntu 22.04 | — | ⚠️ 未测试 |
-| ARM64 架构 | — | ⚠️ 未测试 |
+| ARM64 架构 | — | ⚠️ 程序已由 GitHub 编译并发布，未在 ARM64 机器上实际运行 |
 | 真实云 VPS 整机安装（以上都在容器中完成） | — | ⚠️ 未测试 |
 | 需要 TLS 证书的节点（Trojan、Hysteria2、TUIC、VLESS+TLS 等） | — | ⚠️ 本轮未测试 |
 | machine 模式（机器 ID + 机器 token）的配置 | — | ⚠️ 未测试；升级不改配置，理论上不受影响 |

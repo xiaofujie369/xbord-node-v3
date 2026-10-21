@@ -1,6 +1,6 @@
 # Debian 13 安装与实测记录
 
-> **2026-10-21 更新**：经过完整测试的新版本（分支 `release/xbord-node-v3-tested`）请使用新的指南：[全新安装](FRESH_INSTALL_GUIDE_ZH.md)、[已有 VPS 升级](UPGRADE_GUIDE_ZH.md)。下面的 `install-custom.sh` 仍然只会安装旧版 `custom-hotreload-20261001`。
+> **2026-10-21 更新**：经过完整测试的新版本 v3.0.0（GitHub 自动编译，VPS 上无需编译）请使用新的指南：[全新安装](FRESH_INSTALL_GUIDE_ZH.md)、[已有 VPS 升级](UPGRADE_GUIDE_ZH.md)。下面的 `install-custom.sh` 仍然只会安装旧版 `custom-hotreload-20261001`。
 
 本仓库 main 是定制 Xboard-Node；面板配套快照在 `codex/live-panel-anytls` 分支。旧 `codex/anytls-reality-panel` 分支保留不动。不要把面板分支覆盖到节点目录。
 
