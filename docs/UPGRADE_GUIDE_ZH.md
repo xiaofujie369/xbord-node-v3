@@ -21,7 +21,7 @@
 ## 一键升级命令（熟悉的话直接用）
 
 ```bash
-apt-get update && apt-get install -y curl ca-certificates && curl -fsSL -o /root/xbnode-v3.sh https://raw.githubusercontent.com/xiaofujie369/xbord-node-v3/release/xbord-node-v3-tested/scripts/xbnode-v3.sh && echo "df8798769fdaa591705a74e021767a7bb6b64323c9f6da7f9c05d03cb9a4aa77  /root/xbnode-v3.sh" | sha256sum -c - && bash /root/xbnode-v3.sh upgrade
+apt-get update && apt-get install -y curl ca-certificates && curl -fsSL -o /root/xbnode-v3.sh https://raw.githubusercontent.com/xiaofujie369/xbord-node-v3/release/xbord-node-v3-tested/scripts/xbnode-v3.sh && echo "cfa4faedaf0a6de45f6b9097e8835897fb9204aed96f75efd20d493db8fdbdc4  /root/xbnode-v3.sh" | sha256sum -c - && bash /root/xbnode-v3.sh upgrade
 ```
 
 升级前会自动备份，新版本不能稳定运行时自动回滚。出问题时执行 `bash /root/xbnode-v3.sh rollback` 回到旧版本。下面是分步说明。
@@ -61,7 +61,7 @@ df -h /root
 ```bash
 apt-get update && apt-get install -y curl ca-certificates
 curl -fL -o /root/xbnode-v3.sh https://raw.githubusercontent.com/xiaofujie369/xbord-node-v3/release/xbord-node-v3-tested/scripts/xbnode-v3.sh
-echo "df8798769fdaa591705a74e021767a7bb6b64323c9f6da7f9c05d03cb9a4aa77  /root/xbnode-v3.sh" | sha256sum -c -
+echo "cfa4faedaf0a6de45f6b9097e8835897fb9204aed96f75efd20d493db8fdbdc4  /root/xbnode-v3.sh" | sha256sum -c -
 ```
 
 最后一行必须输出 `/root/xbnode-v3.sh: OK`。如果显示 `FAILED`，**停止操作**，脚本可能被篡改了，或者下载不完整。
@@ -167,6 +167,42 @@ systemctl status xboard-node-custom --no-pager
 
 标准布局把路径换成 `/usr/local/bin/xboard-node`，服务名换成 `xboard-node`。
 
+## 多端口：用户随机连接端口（可选）
+
+效果：面板给每个用户的订阅随机分配一个范围内的端口（例如 8443-11443），所有这些端口都能连到同一个节点。
+
+**原理**：XBoard 下发给节点的「服务端口」只能是一个数字，节点只监听这一个端口。脚本用系统防火墙（nftables）把整个范围的 TCP 和 UDP 都转到这个端口上，IPv4 和 IPv6 都生效，开机自动恢复。转发规则放在脚本自己的规则表里，不会改动你原有的防火墙规则。
+
+**1. 面板设置**（「节点管理」→ 编辑节点）：
+
+- **连接端口**：填范围，例如 `8443-11443`。用户每次更新订阅时，会随机拿到其中一个端口。
+- **服务端口**：只填**一个**端口，例如 `8443`。不要填范围，填了也只会用第一个端口。
+
+**2. 在节点 VPS 上开启转发**（把范围和端口换成你自己的）：
+
+```bash
+bash /root/xbnode-v3.sh port-range 8443-11443 --listen-port 8443
+```
+
+`--listen-port` 要与面板的「服务端口」一致；不写时默认是范围的第一个端口。全新安装时，也可以直接在 `install` 命令末尾加上 `--port-range 8443-11443 --listen-port 8443`。
+
+**3. 云服务商安全组**：放行整个范围 `8443-11443` 的 **TCP 和 UDP**。系统里的 ufw 只需要放行服务端口本身（例如 `8443`），因为转发发生在 ufw 检查之前。
+
+**查看、修改、关闭：**
+
+```bash
+bash /root/xbnode-v3.sh status                                   # 显示「端口范围：8443-11443 → 8443（active）」
+bash /root/xbnode-v3.sh port-range 9000-9999 --listen-port 8443  # 换一个范围（直接覆盖旧的）
+bash /root/xbnode-v3.sh port-range off                           # 关闭转发
+```
+
+注意事项：
+
+- 范围内如果已经有其他程序在监听（例如 SSH、网站），脚本会拒绝开启，避免把它们的连接转走。
+- 升级、回滚不会影响转发；卸载节点时会一并删除转发规则。
+- 如果你自己执行了 `systemctl restart nftables`，它会清空所有规则，之后执行 `systemctl restart xbnode-port-range` 恢复转发。
+- 订阅里的端口是**每次更新订阅时随机一次**，不是每次连接都换。Hysteria2 节点的订阅还会带上整个范围，支持的客户端会自动在这些端口之间跳。
+
 ## 8. 常见问题排查
 
 | 现象 | 处理 |
@@ -197,6 +233,7 @@ rm -rf /root/xbnode-v3-backup-要删除的那一个
 | **v3.0.0 Release 升级**：从旧版 `custom-hotreload-20261001`（`install-custom.sh` 布局）升级，配置不变；随后回滚 | Debian 12（隔离环境，内存限制 600 MB） | ✅ 通过，升级耗时 12 秒 |
 | **v3.0.0 Release 升级**：从上游 v1.13（`install.sh` 标准布局）升级，配置和 `credentials.env` 不变，`xbctl` 一并更新为 v3.0.0；随后回滚 | Ubuntu 24.04（隔离环境，内存限制 600 MB） | ✅ 通过，耗时约 12 秒 |
 | 下载的文件 SHA-256 不符时拒绝安装，旧节点不受影响 | Debian 12（隔离环境） | ✅ 通过 |
+| **多端口转发**（`port-range` / `install --port-range`）：范围内的端口 TCP 都能连到节点，范围外的端口不转发；UDP 转发到节点端口；`status` 显示；开机自启；重启后规则自动恢复；范围内有其他程序监听时拒绝；更换范围；`off` 关闭；卸载时清除；错误参数被拒绝且不会安装 | Debian 12（隔离环境，独立网络命名空间） | ✅ 12/12 通过 |
 | GitHub Actions：单元测试、amd64 / arm64 编译、生成 SHA256SUMS、发布 Release | GitHub | ✅ 全部成功 |
 
 下面几项是用同一份程序代码（提交 `7dc6662`）在本地编译的版本测的，功能代码与 v3.0.0 完全相同，只是版本号显示不同：
@@ -219,4 +256,5 @@ rm -rf /root/xbnode-v3-backup-要删除的那一个
 | machine 模式（机器 ID + 机器 token）的配置 | — | ⚠️ 未测试；升级不改配置，理论上不受影响 |
 | xray 内核的真实客户端 | — | ⚠️ 未测试 |
 | ufw 防火墙命令 | — | ⚠️ 为 ufw 标准用法，本轮未执行 |
+| 多端口：用真实 Hysteria2 / TUIC / VLESS Reality 客户端经范围内端口连接；IPv6 转发 | — | ⚠️ 未测试（已验证转发规则本身对 TCP 和 UDP 有效） |
 | Docker 方式部署的节点 | — | ❌ 不支持，本指南不适用 |

@@ -5,8 +5,11 @@
 # back or uninstalls the node service. Nothing is compiled on the VPS.
 #
 #   xbnode-v3.sh install --panel-url URL --node-id N --node-type TYPE [--token-file F] [--binary F]
+#                        [--port-range LO-HI [--listen-port P]]
 #   xbnode-v3.sh upgrade [--binary F]          upgrade an existing installation in place
 #   xbnode-v3.sh rollback [BACKUP_DIR]         restore the latest (or given) backup
+#   xbnode-v3.sh port-range LO-HI [--listen-port P] | off
+#                                              redirect a TCP+UDP port range to the node port
 #   xbnode-v3.sh uninstall [--purge]           remove the service; --purge also deletes config
 #   xbnode-v3.sh status
 set -Eeuo pipefail
@@ -34,11 +37,17 @@ STD_BIN=/usr/local/bin/xboard-node
 STD_CLI=/usr/local/bin/xbctl
 STD_CONF=/etc/xboard-node/config.yml
 STD_UNIT=xboard-node.service
+# Port-range redirect: an nftables table of our own, loaded by a oneshot unit.
+PR_DIR=/etc/xbnode-v3
+PR_CONF=$PR_DIR/port-range.nft
+PR_UNIT=xbnode-port-range.service
+PR_TABLE=xbnode_portrange
 
 say() { printf '==> %s\n' "$*"; }
 fail() { printf '错误：%s\n' "$*" >&2; exit 1; }
 
-PANEL_URL='' NODE_ID='' NODE_TYPE='' TOKEN_FILE='' BINARY='' CLI_BINARY='' PURGE=0 ROLLBACK_DIR=''
+PANEL_URL='' NODE_ID='' NODE_TYPE='' TOKEN_FILE='' BINARY='' CLI_BINARY='' PURGE=0 POS_ARG=''
+PORT_RANGE='' LISTEN_PORT=''
 
 cleanup() { rm -rf "$WORK_DIR"; }
 trap cleanup EXIT
@@ -52,8 +61,10 @@ parse_args() {
         --token-file) TOKEN_FILE=${2:-}; shift 2 ;;
         --binary) BINARY=${2:-}; shift 2 ;;
         --purge) PURGE=1; shift ;;
+        --port-range) PORT_RANGE=${2:-}; shift 2 ;;
+        --listen-port) LISTEN_PORT=${2:-}; shift 2 ;;
         -*) fail "未知参数 $1" ;;
-        *) ROLLBACK_DIR=$1; shift ;;
+        *) POS_ARG=$1; shift ;;
         esac
     done
 }
@@ -158,6 +169,90 @@ restore_backup() {
     wait_healthy "$unit"
 }
 
+# Sets PR_LO, PR_HI and PR_TO (the node port; defaults to the first port of the range,
+# which is also what XBoard sends as server_port when a range is entered there).
+parse_port_range() {
+    [[ $1 =~ ^([0-9]{1,5})-([0-9]{1,5})$ ]] || fail '端口范围格式应为「起始-结束」，例如 8443-11443'
+    PR_LO=$((10#${BASH_REMATCH[1]})) PR_HI=$((10#${BASH_REMATCH[2]}))
+    ((PR_LO >= 1 && PR_HI <= 65535 && PR_LO < PR_HI)) || fail '端口范围需在 1-65535 之间，且起始端口小于结束端口'
+    PR_TO=${LISTEN_PORT:-$PR_LO}
+    [[ $PR_TO =~ ^[0-9]{1,5}$ ]] && ((10#$PR_TO >= 1 && 10#$PR_TO <= 65535)) || fail '--listen-port 需为 1-65535 的端口'
+    PR_TO=$((10#$PR_TO))
+}
+
+# Redirecting a port another program listens on would silently steal its traffic.
+check_range_free() {
+    command -v ss >/dev/null || ensure_packages iproute2
+    local p busy=()
+    while read -r p; do
+        ((p >= PR_LO && p <= PR_HI && p != PR_TO)) && busy+=("$p")
+    done < <(ss -Hlntu | awk '{n = split($5, a, ":"); print a[n]}' | sort -un)
+    ((${#busy[@]} == 0)) || fail "端口范围内已有其他程序在监听：${busy[*]}。转发后它们会收不到连接，请换一个范围"
+}
+
+apply_port_range() {
+    ensure_packages nftables
+    check_range_free
+    local nft; nft=$(command -v nft)
+    install -d -m 755 "$PR_DIR"
+    cat > "$PR_CONF.new" <<NFT
+# 由 xbnode-v3.sh 生成：把 $PR_LO-$PR_HI 的 TCP/UDP 连接转到节点端口 $PR_TO（IPv4 和 IPv6）
+table inet $PR_TABLE
+delete table inet $PR_TABLE
+table inet $PR_TABLE {
+    chain prerouting {
+        type nat hook prerouting priority dstnat; policy accept;
+        meta l4proto { tcp, udp } th dport $PR_LO-$PR_HI redirect to :$PR_TO
+    }
+}
+NFT
+    "$nft" -c -f "$PR_CONF.new" || { rm -f "$PR_CONF.new"; fail '系统不支持这条 nftables 转发规则（内核需 5.2 以上）'; }
+    chmod 644 "$PR_CONF.new" && mv -f "$PR_CONF.new" "$PR_CONF"
+    cat > "/etc/systemd/system/$PR_UNIT" <<UNIT
+[Unit]
+Description=xbord-node port range redirect (nftables)
+Wants=network-pre.target
+After=network-pre.target nftables.service
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=$nft -f $PR_CONF
+ExecStop=$nft delete table inet $PR_TABLE
+[Install]
+WantedBy=multi-user.target
+UNIT
+    chmod 644 "/etc/systemd/system/$PR_UNIT"
+    systemctl daemon-reload
+    systemctl enable "$PR_UNIT" >/dev/null 2>&1
+    systemctl restart "$PR_UNIT" && "$nft" list table inet "$PR_TABLE" >/dev/null || fail '转发规则加载失败，请查看 journalctl -u xbnode-port-range'
+    say "已开启端口范围：$PR_LO-$PR_HI（TCP+UDP）→ 节点端口 $PR_TO，开机自动生效"
+    say "面板「连接端口」填 $PR_LO-$PR_HI、「服务端口」填 $PR_TO；云服务商安全组放行 $PR_LO-$PR_HI 的 TCP 和 UDP"
+    ss -Hlnt "sport = :$PR_TO" | grep -q . ||
+        say "提示：节点当前没有在 $PR_TO 端口监听，请确认面板「服务端口」填的是 $PR_TO"
+}
+
+remove_port_range() {
+    [[ -f /etc/systemd/system/$PR_UNIT ]] || return 1
+    systemctl disable --now "$PR_UNIT" >/dev/null 2>&1 || true
+    nft delete table inet "$PR_TABLE" 2>/dev/null || true
+    rm -f "/etc/systemd/system/$PR_UNIT" "$PR_CONF"
+    rmdir "$PR_DIR" 2>/dev/null || true
+    systemctl daemon-reload
+    say '已关闭端口范围转发'
+}
+
+cmd_port_range() {
+    case $POS_ARG in
+    off) remove_port_range || say '本机没有开启端口范围转发' ;;
+    '') fail '用法：xbnode-v3.sh port-range 8443-11443 [--listen-port 8443]，关闭用 port-range off' ;;
+    *)
+        [[ $(detect_layout) != none ]] || fail '没有找到已安装的节点，请先安装'
+        parse_port_range "$POS_ARG"
+        apply_port_range
+        ;;
+    esac
+}
+
 cmd_upgrade() {
     LAYOUT=$(detect_layout)
     [[ $LAYOUT != none ]] || fail '没有找到已安装的节点；新机器请用 install'
@@ -189,6 +284,7 @@ cmd_install() {
     [[ $NODE_ID =~ ^[1-9][0-9]*$ ]] || fail '--node-id 需为面板上节点的数字 ID'
     [[ $NODE_TYPE =~ ^(shadowsocks|vmess|vless|trojan|hysteria|tuic|anytls|socks|naive|http|mieru)$ ]] ||
         fail '--node-type 需与面板节点类型一致，例如 vless、trojan、shadowsocks'
+    [[ -z $PORT_RANGE ]] || parse_port_range "$PORT_RANGE"
     local token
     if [[ -n $TOKEN_FILE ]]; then
         token=$(tr -d '\r\n' < "$TOKEN_FILE")
@@ -198,6 +294,7 @@ cmd_install() {
         printf '\n' >&3
     fi
     [[ -n $token ]] || fail '通讯密钥不能为空'
+    [[ -z $PORT_RANGE ]] || check_range_free
     ensure_packages ca-certificates curl python3
     obtain_binary
 
@@ -243,6 +340,7 @@ SERVICE
     if wait_healthy "$UNIT"; then
         say "安装完成并已设置开机自启：$("$BIN" -v)"
         say "查看日志：journalctl -u $UNIT -f"
+        [[ -z $PORT_RANGE ]] || apply_port_range
     else
         journalctl -u "$UNIT" -n 30 --no-pager || true
         fail '服务启动后未能稳定运行，请按指南「排错」检查面板地址、节点 ID、类型和通讯密钥'
@@ -250,7 +348,7 @@ SERVICE
 }
 
 cmd_rollback() {
-    local dir=$ROLLBACK_DIR
+    local dir=$POS_ARG
     [[ -n $dir ]] || dir=$(ls -1dt "$BACKUP_ROOT"/xbnode-v3-backup-* 2>/dev/null | head -1 || true)
     [[ -n $dir && -f $dir/layout && -f $dir/xboard-node ]] || fail '没有找到可用的备份目录'
     say "从 $dir 回滚"
@@ -264,6 +362,7 @@ cmd_uninstall() {
     [[ $LAYOUT != none ]] || fail '没有找到已安装的节点'
     set_layout_vars "$LAYOUT"
     systemctl disable --now "$UNIT" 2>/dev/null || true
+    remove_port_range || true
     rm -f "/etc/systemd/system/$UNIT" "$BIN"
     [[ -n $CLI ]] && rm -f "$CLI"
     systemctl daemon-reload
@@ -284,6 +383,9 @@ cmd_status() {
     echo "程序：$BIN"
     echo "版本：$("$BIN" -v 2>&1 || true)"
     echo "服务：$UNIT $(systemctl is-active "$UNIT" || true) / 开机自启 $(systemctl is-enabled "$UNIT" 2>/dev/null || true)"
+    if [[ -f $PR_CONF ]]; then
+        echo "端口范围：$(grep -o 'dport [0-9-]* redirect to :[0-9]*' "$PR_CONF" | sed 's/dport //; s/ redirect to :/ → /')（$(systemctl is-active "$PR_UNIT" || true)）"
+    fi
 }
 
 main() {
@@ -294,9 +396,10 @@ main() {
     install) preflight; cmd_install ;;
     upgrade) preflight; cmd_upgrade ;;
     rollback) preflight; cmd_rollback ;;
+    port-range) preflight; cmd_port_range ;;
     uninstall) preflight; cmd_uninstall ;;
     status) cmd_status ;;
-    *) sed -n '2,11p' "$0"; exit 2 ;;
+    *) sed -n '2,14p' "$0"; exit 2 ;;
     esac
 }
 main "$@"
